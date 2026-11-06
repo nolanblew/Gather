@@ -1,0 +1,12 @@
+node_modules
+dist
+data
+.git
+docs/prototypes
+output
+test-results
+*.log
+.env
+android
+*.jks
+*.keystore

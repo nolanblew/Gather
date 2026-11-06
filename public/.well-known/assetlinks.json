@@ -1,0 +1,14 @@
+[
+  {
+    "target": {
+      "package_name": "ninja.takeya.gather",
+      "sha256_cert_fingerprints": [
+        "75:4B:1A:8C:7C:8E:78:AF:87:A9:A3:F0:60:B7:80:A1:FA:0F:FE:9E:C8:82:10:34:B4:84:2E:37:D1:AB:06:4D"
+      ],
+      "namespace": "android_app"
+    },
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ]
+  }
+]

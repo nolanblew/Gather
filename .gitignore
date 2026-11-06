@@ -1,0 +1,17 @@
+node_modules/
+dist/
+data/
+*.log
+.env
+test-results/
+playwright-report/
+output/
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/**/build/
+*.jks
+*.keystore
+release.properties
+
+.playwright-cli/

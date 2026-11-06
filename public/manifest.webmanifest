@@ -1,0 +1,16 @@
+{
+  "name": "Gather — your lists, together",
+  "short_name": "Gather",
+  "description": "Everyday lists, ideas and reusable checklists.",
+  "id": "/",
+  "scope": "/",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F7F4ED",
+  "theme_color": "#276653",
+  "icons": [
+    { "src": "/icons/gather-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/gather-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/gather-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

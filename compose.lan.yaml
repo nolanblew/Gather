@@ -1,0 +1,31 @@
+name: gather-lan
+services:
+  gather:
+    image: ${GATHER_IMAGE:?Set GATHER_IMAGE to the verified release tag}
+    ports:
+      - "${GATHER_BIND_ADDRESS:-192.168.68.68}:${GATHER_HOST_PORT:-48732}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATA_DIR: /app/data
+      GATHER_COOKIE_SECURE: ${GATHER_COOKIE_SECURE:-true}
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-local}
+      SEARCH_LOCAL_MODEL: ${SEARCH_LOCAL_MODEL:-Xenova/all-MiniLM-L6-v2}
+      SEARCH_OPENAI_BASE_URL: ${SEARCH_OPENAI_BASE_URL:-https://api.openai.com/v1/}
+      SEARCH_IDLE_MS: ${SEARCH_IDLE_MS:-300000}
+      SEARCH_MAX_EMBEDDINGS: ${SEARCH_MAX_EMBEDDINGS:-4096}
+      SEARCH_INDEX_BATCH_LIMIT: ${SEARCH_INDEX_BATCH_LIMIT:-64}
+      SEARCH_OPENAI_MODEL: ${SEARCH_OPENAI_MODEL:-gpt-6-luna}
+      SEARCH_REASONING_EFFORT: ${SEARCH_REASONING_EFFORT:-low}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    cpus: ${GATHER_CPUS:-0.5}
+    mem_limit: ${GATHER_MEMORY_LIMIT:-512m}
+    mem_reservation: 192m
+    pids_limit: 128
+    volumes:
+      - gather-data:/app/data
+    restart: unless-stopped
+volumes:
+  gather-data:
+    name: ${GATHER_DATA_VOLUME:-gather_lan_data}
+    external: true
