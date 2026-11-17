@@ -31,6 +31,8 @@ Release application ID: `ninja.takeya.gather`. Keep the signing keystore and its
 
 The signed, optimized APK is `app/build/outputs/apk/release/app-release.apk`. Release packaging fails if signing is unavailable. Retain the same keystore for upgrades. The website's `/.well-known/assetlinks.json` must contain this package and release certificate fingerprint to verify Android App Links. Debug signatures are deliberately not trusted by production App Links.
 
+See [manual GitHub releases](../docs/ORGANIZATION-ANDROID-RELEASE-20261116.md#manual-github-releases) for the signed APK workflow, required secrets, and release tags.
+
 ## What is native
 
 Every screen is Compose, including registration/sign-in, library/favorites/templates/archive, scoped search, personal categories, list details, checklist and notes editing, quantities/notes/sections, accessible ordering controls, template copies and checklist reset, member management/invitation preview and joining, password changes, appearance, and backup import/export. Android's share sheet distributes invitation links. Gather also receives shared plain text for capture into an existing list. SAF file pickers read and write JSON without storage permissions. Archive, deletion, reset, membership removal, sign-out, and backup import have explicit confirmations where appropriate.

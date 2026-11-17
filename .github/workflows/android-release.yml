@@ -1,0 +1,173 @@
+name: Release Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Must match the app version, for example android-v1.2.0"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: android-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+
+jobs:
+  build:
+    name: Build and verify signed APK
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate the requested version
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -nE 's/^[[:space:]]*versionName = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' android/app/build.gradle.kts)
+          code=$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)$/\1/p' android/app/build.gradle.kts)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$code" =~ ^[1-9][0-9]*$ || "$RELEASE_TAG" != "android-v$version" ]]; then
+            echo "::error::Use a tag that matches the checked-out Android version, such as android-v1.2.0."
+            exit 1
+          fi
+          printf 'name=%s\ncode=%s\n' "$version" "$code" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'platforms;android-35' 'build-tools;36.0.0'
+
+      - name: Build with the production signing key
+        shell: bash
+        working-directory: android
+        env:
+          GATHER_ANDROID_KEYSTORE_BASE64: ${{ secrets.GATHER_ANDROID_KEYSTORE_BASE64 }}
+          GATHER_ANDROID_STORE_PASSWORD: ${{ secrets.GATHER_ANDROID_STORE_PASSWORD }}
+          GATHER_ANDROID_KEY_ALIAS: ${{ secrets.GATHER_ANDROID_KEY_ALIAS }}
+          GATHER_ANDROID_KEY_PASSWORD: ${{ secrets.GATHER_ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$GATHER_ANDROID_KEYSTORE_BASE64" || -z "$GATHER_ANDROID_STORE_PASSWORD" || -z "$GATHER_ANDROID_KEY_ALIAS" || -z "$GATHER_ANDROID_KEY_PASSWORD" ]]; then
+            echo "::error::Configure all four Android signing secrets before running the release workflow."
+            exit 1
+          fi
+
+          umask 077
+          signing_dir=$(mktemp -d "$RUNNER_TEMP/gather-signing.XXXXXXXX")
+          trap 'rm -f -- "$signing_dir/keystore" "$signing_dir/release.properties" "$signing_dir/WriteSigningProperties.java"; rmdir -- "$signing_dir"' EXIT
+          printf '%s' "$GATHER_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$signing_dir/keystore"
+          cat > "$signing_dir/WriteSigningProperties.java" <<'JAVA'
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.Properties;
+
+          class WriteSigningProperties {
+              public static void main(String[] args) throws Exception {
+                  Path directory = Path.of(args[0]);
+                  Properties properties = new Properties();
+                  properties.setProperty("storeFile", directory.resolve("keystore").toString());
+                  properties.setProperty("storePassword", System.getenv("GATHER_ANDROID_STORE_PASSWORD"));
+                  properties.setProperty("keyAlias", System.getenv("GATHER_ANDROID_KEY_ALIAS"));
+                  properties.setProperty("keyPassword", System.getenv("GATHER_ANDROID_KEY_PASSWORD"));
+                  try (var output = Files.newOutputStream(directory.resolve("release.properties"))) {
+                      properties.store(output, null);
+                  }
+              }
+          }
+          JAVA
+          java "$signing_dir/WriteSigningProperties.java" "$signing_dir"
+          unset GATHER_ANDROID_KEYSTORE_BASE64 GATHER_ANDROID_STORE_PASSWORD GATHER_ANDROID_KEY_ALIAS GATHER_ANDROID_KEY_PASSWORD
+          export GATHER_SIGNING_PROPERTIES="$signing_dir/release.properties"
+          bash ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Verify APK identity and prepare the artifact
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.name }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+        run: |
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          build_tools="$ANDROID_HOME/build-tools/36.0.0"
+          signature=$("$build_tools/apksigner" verify --print-certs "$apk")
+          certificate=$(sed -nE 's/^Signer #1 certificate SHA-256 digest: ([0-9a-f]{64})$/\1/p' <<< "$signature")
+          if [[ "$certificate" != '754b1a8c7c8e78af87a9a3f060b780a1fa0ffe9ec8821034b4842e37d1ab064d' ]]; then
+            echo "::error::The APK was not signed with the installed production Gather certificate."
+            exit 1
+          fi
+          badging=$("$build_tools/aapt" dump badging "$apk")
+          if [[ "$badging" != "package: name='ninja.takeya.gather' versionCode='$VERSION_CODE' versionName='$VERSION' "* || "$badging" == *application-debuggable* ]]; then
+            echo "::error::The APK package, build type, or version did not match the expected release."
+            exit 1
+          fi
+          mkdir release-apk
+          cp "$apk" "release-apk/Gather-$VERSION.apk"
+          cd release-apk
+          sha256sum "Gather-$VERSION.apk" > "Gather-$VERSION.apk.sha256"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Gather-${{ steps.version.outputs.name }}-android
+          path: release-apk/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Attach APK to GitHub Release
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: Gather-${{ needs.build.outputs.version }}-android
+          path: release-apk
+
+      - name: Publish the verified release assets
+        shell: bash
+        working-directory: release-apk
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          apk="Gather-$VERSION.apk"
+          sha256sum --check "$apk.sha256"
+
+          refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG")
+          if jq -e --arg ref "refs/tags/$RELEASE_TAG" 'any(.[]; .ref == $ref)' <<< "$refs" > /dev/null; then
+            tagged_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
+            if [[ "$tagged_commit" != "$GITHUB_SHA" ]]; then
+              echo "::error::The release tag already points to a different commit."
+              exit 1
+            fi
+            tag_exists=true
+          else
+            tag_exists=false
+          fi
+
+          release=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" | jq -sr --arg tag "$RELEASE_TAG" '[.[][] | select(.tag_name == $tag)] | first // empty')
+          if [[ -z "$release" ]]; then
+            gh release create "$RELEASE_TAG" "$apk" "$apk.sha256" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title "Gather Android $VERSION" --generate-notes
+          elif [[ "$tag_exists" != true ]]; then
+            echo "::error::The existing release has no fixed tag. Verify its target commit before attaching assets."
+            exit 1
+          elif jq -e --arg name "$apk" 'any(.assets[]; .name == $name)' <<< "$release" > /dev/null; then
+            echo "The release already contains $apk."
+          else
+            gh release upload "$RELEASE_TAG" "$apk" "$apk.sha256" --repo "$GITHUB_REPOSITORY"
+          fi
