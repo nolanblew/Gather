@@ -1,6 +1,6 @@
 # Organization implementation verification
 
-Date: 2026-11-16. Phase 1 implemented and locally verified. No production deployment, release signing, commit or push performed.
+Date: 2026-11-16. Phase 1 implemented and locally verified. The initial checks below preceded deployment. The subsequent authorized rollout is recorded in [production release](ORGANIZATION-RELEASE-20261116.md).
 
 ## Automated checks
 

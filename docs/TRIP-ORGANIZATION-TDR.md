@@ -1,6 +1,6 @@
 # Gather: simple organization — technical design
 
-Final Phase 1 contract, 2026-11-16. Implemented and locally verified; production rollout remains separate.
+Final Phase 1 contract, 2026-11-16. Implemented and verified; see the [production release record](ORGANIZATION-RELEASE-20261116.md).
 
 [Product requirements](TRIP-ORGANIZATION-PRD.md), [canonical UI copy](ORGANIZATION-COPY.md), [progressive disclosure](ORGANIZATION-DISCLOSURE.md).
 

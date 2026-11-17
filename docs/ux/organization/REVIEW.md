@@ -40,4 +40,3 @@ Initial picker fidelity failed because the editor backdrop changed and the For s
 ## Limits
 
 Images are design mocks, not live application screenshots or tested interactions. Review did not establish contrast compliance, tap targets, keyboard/focus behavior, large text, or real persistence. Implement the count accessible name as '1 item without a place'. Quantity icon is generic; use the app's actual icon system during implementation. Prompts are saved in PROMPTS.md and REVISION-PROMPTS.md. All versions are retained. No application code changed.
-

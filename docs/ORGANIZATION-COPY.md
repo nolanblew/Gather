@@ -1,6 +1,6 @@
 # Gather organization: copy reference
 
-Date: 2026-11-16  
+Date: 2026-11-16
 Status: Proposed canonical user-facing wording for the organization feature. [Progressive disclosure](ORGANIZATION-DISCLOSURE.md) is the current interaction direction. This reference supersedes conflicting UI wording in earlier proposals; it does not change the data model.
 
 Use sentence case. Show helpers only where specified or when needed to explain an unusual state. Text in `{braces}` is replaced with a user-provided value or count; use appropriate singular and plural forms. Technical documentation may continue to use terms such as recipient, assignment, completion, and filter dimension; these are not automatically UI labels.
@@ -117,4 +117,3 @@ Keep the user's draft when saving fails or another edit conflicts. When offline,
 - **Place** accommodates shops, cities, home, work, and online services without implying a GPS location. **Any one of these places works** makes the alternative-place meaning explicit.
 - **Filter this list** names the action; **Number items** is separate because it changes a shared setting. Avoid the overloaded “View” panel terminology in the current UI.
 - **Description** replaces “note” for the editable prose field in this feature. Notes as a list kind remain distinct. Do not add automatic interpretation or AI claims to this manual flow.
-

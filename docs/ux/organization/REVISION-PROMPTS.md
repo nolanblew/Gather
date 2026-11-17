@@ -7,4 +7,3 @@ Edit this exact screenshot by overlaying an Add detail bottom sheet on it. PRESE
 ## filter-v2
 
 Edit this Gather Places-only Filters screenshot minimally. Preserve exact filter layout, Kyoto selected radio, all six choices, 3 items match, Cancel and Apply, description and palette. Change 'No places set' row to 'No places set' with quiet right-aligned count '1'. Change underlying title 'Japan shopping' to 'Japan finds' to distinguish this places-only example. Change the THREE dimmed underlying list completion circles into square outlined unchecked checkboxes, clearly distinct from filter radio buttons. No recipient filter, no completion selector, no formatting controls, no new helper text. Leave all other text and layout unchanged.
-

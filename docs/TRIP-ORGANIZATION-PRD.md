@@ -1,6 +1,6 @@
 # Gather: simple organization — product requirements
 
-Final Phase 1 design, 2026-11-16. Implemented for web and Android; local verification is recorded in [implementation checks](ORGANIZATION-IMPLEMENTATION-VERIFICATION.md). Not deployed to production.
+Final Phase 1 design, 2026-11-16. Implemented for web and Android; local verification is recorded in [implementation checks](ORGANIZATION-IMPLEMENTATION-VERIFICATION.md). See the [production release record](ORGANIZATION-RELEASE-20261116.md).
 
 ## Purpose
 
@@ -68,4 +68,3 @@ Network is required for changes. Current in-memory content and local filters sta
 ## Deferred Phase 2
 
 Foreground location suggestions and assisted capture remain separate future work. No background geofencing, automatic list classification, AI metadata assignment, new hosted-data transmission, arbitrary field builder, task-assignee workflow or offline editing in Phase 1. Existing vetted concepts can be revisited after the simple manual flow is validated.
-

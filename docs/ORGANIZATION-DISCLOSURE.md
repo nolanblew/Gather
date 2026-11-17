@@ -73,4 +73,3 @@ The initial five choices fit a compact picker. If the supported set later exceed
 ## Next mock scope
 
 Replace the settings-heavy options mock with a plain-list item editor and its small Add detail picker, then a place-only filter sheet. Show the fully populated editor only as an advanced state reached by explicit actions. Reuse the existing independent review thresholds, but assess unwanted controls as a first-class simplicity failure.
-
