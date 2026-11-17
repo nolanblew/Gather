@@ -12,8 +12,8 @@ android {
         minSdk = 34
         targetSdk = 35
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 4
-        versionName = "1.1.2"
+        versionCode = 5
+        versionName = "1.2.0"
         buildConfigField("String", "SERVER_URL", "\"https://gather.takeya.ninja/\"")
     }
     buildFeatures { compose = true; buildConfig = true }

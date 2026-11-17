@@ -22,6 +22,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.*
 import androidx.compose.material.icons.outlined.*
@@ -38,6 +40,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.*
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
@@ -57,9 +60,15 @@ sealed interface Editor {
         val list: GatherList,
         val item: ListItem? = null,
         val sectionId: String? = null,
+        val initialText: String = "",
+        val filter: ListFilter = ListFilter(),
     ) : Editor
 
     data class SectionForm(val list: GatherList, val section: Section? = null) : Editor
+
+    data class Filters(val list: GatherList, val filter: ListFilter) : Editor
+
+    data class Definitions(val list: GatherList) : Editor
 
     data class CategoryForm(val category: Category? = null) : Editor
 
@@ -158,6 +167,8 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                                 list.sections.any { it.id == current.section.id }
                         } ?: false
                 is Editor.Share -> state.workspace.lists.any { it.id == current.list.id }
+                is Editor.Filters -> state.workspace.lists.any { it.id == current.list.id }
+                is Editor.Definitions -> state.workspace.lists.any { it.id == current.list.id }
                 is Editor.CategoryForm ->
                     current.category == null ||
                         state.workspace.categories.any { it.id == current.category.id }
@@ -1002,16 +1013,104 @@ fun DetailScreen(
     compactHeader: Boolean = false,
 ) {
     var more by remember { mutableStateOf(false) }
+    var lastPlaces by remember(list.id) { mutableStateOf(list.places) }
+    var lastRecipients by remember(list.id) { mutableStateOf(list.recipients) }
+    val ui = model.ui
+    val filter = ui.filters[list.id] ?: ListFilter()
+    val showDetails = ui.hiddenDetails[list.id] != true
+    val hiddenSaved = ui.hiddenSavedItems[list.id]
+    val capture = ui.itemCapture[list.id].orEmpty()
+    val organization = state.workspace.version >= 3
+    val canFilter =
+        filter.active || list.usesPlaces || list.usesRecipients ||
+            (list.kind == "checklist" && list.checkedCount > 0)
+    val scroll = ui.listScroll("detail:${list.id}")
+    val canonical = remember(list) { list.canonicalItems() }
+    val ordinals = remember(list.numbered, canonical) {
+        if (list.numbered) canonical.mapIndexed { index, item -> item.id to index + 1 }.toMap()
+        else emptyMap()
+    }
+    val visibleItems = remember(canonical, filter) { canonical.filter(filter::matches) }
+    val groups = visibleItems.groupBy { it.sectionId }
+    val unsectioned = groups[null].orEmpty()
+    val sections = list.sections.sortedBy { it.position }.filter {
+        !filter.active || groups[it.id].orEmpty().isNotEmpty()
+    }
+    val focusManager = LocalFocusManager.current
+    val openFilter = { draft: ListFilter -> edit(Editor.Filters(list, draft)) }
+    fun clearFilters() {
+        ui.filters.remove(list.id)
+        ui.hiddenSavedItems.remove(list.id)
+    }
+    LaunchedEffect(list.places, list.recipients, list.kind, filter) {
+        val removedPlace = filter.place?.takeIf { list.placeFilterLabel(it) == null }
+        val removedPerson = filter.person?.takeIf { id ->
+            id != FILTER_UNSET && list.recipients.none { it.id == id }
+        }
+        val reconciled = filter.copy(
+            place = filter.place.takeIf { removedPlace == null },
+            person = filter.person.takeIf { removedPerson == null },
+            notDone = filter.notDone && list.kind == "checklist",
+        )
+        if (reconciled != filter) {
+            if (reconciled.active) ui.filters[list.id] = reconciled else ui.filters.remove(list.id)
+        }
+        removedPlace?.let { id ->
+            val label = lastPlaces.find { it.id == id }?.label ?: "The place"
+            model.report("$label was removed. The filter was cleared.")
+        }
+        removedPerson?.let { id ->
+            val label = lastRecipients.find { it.id == id }?.name ?: "The person"
+            model.report("$label was removed. The filter was cleared.")
+        }
+        lastPlaces = list.places
+        lastRecipients = list.recipients
+    }
+    val revealItem = ui.itemToReveal[list.id]
+    LaunchedEffect(revealItem, visibleItems, filter) {
+        if (revealItem == null || filter.active) return@LaunchedEffect
+        val target = visibleItems.find { it.id == revealItem }
+        if (target != null) {
+            var index = 2 + if (hiddenSaved == null) 0 else 1
+            if (target.sectionId == null) index += unsectioned.indexOf(target)
+            else {
+                index += unsectioned.size
+                for (section in sections) {
+                    index++
+                    val content = groups[section.id].orEmpty()
+                    if (section.id == target.sectionId) {
+                        index += content.indexOf(target)
+                        break
+                    }
+                    index += maxOf(content.size, 1)
+                }
+            }
+            scroll.scrollToItem(index)
+        }
+        ui.itemToReveal.remove(list.id)
+    }
+    val addItem = {
+        if (capture.isNotBlank() && writable) {
+            focusManager.clearFocus()
+            if (filter.place != null || filter.person != null) {
+                edit(Editor.ItemForm(list, initialText = capture, filter = filter))
+            } else {
+                model.action("item.create", list.orderedPayload("text" to capture.trim()), onSuccess = {
+                    ui.itemCapture.remove(list.id)
+                    model.showSavedItem(list.id, null)
+                })
+            }
+        }
+    }
     val progress by
         animateFloatAsState(
             if (list.items.isEmpty()) 0f else list.checkedCount.toFloat() / list.items.size,
             animationSpec = GatherMotion.standard(),
             label = "Checklist progress",
         )
-    val unsectioned = remember(list) { sortedGroup(list, null) }
     LazyColumn(
         Modifier.widthIn(max = 840.dp).fillMaxSize(),
-        state = model.ui.listScroll("detail:${list.id}"),
+        state = scroll,
         contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 4.dp, bottom = 30.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -1060,7 +1159,7 @@ fun DetailScreen(
                             }
                             DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
                                 DropdownMenuItem(
-                                    text = { Text("Edit list details") },
+                                    text = { Text("List details") },
                                     onClick = {
                                         more = false
                                         edit(Editor.ListForm(list))
@@ -1068,6 +1167,62 @@ fun DetailScreen(
                                     leadingIcon = { Icon(Icons.Outlined.Edit, null) },
                                     enabled = writable,
                                 )
+                                if (organization && list.owner)
+                                    DropdownMenuItem(
+                                        text = { Text("Number items") },
+                                        onClick = {
+                                            more = false
+                                            model.action(
+                                                "list.update",
+                                                payload(
+                                                    "listId" to list.id,
+                                                    "numbered" to !list.numbered,
+                                                    "expectedOrderToken" to list.orderToken,
+                                                ),
+                                            )
+                                        },
+                                        trailingIcon = { if (list.numbered) Icon(Icons.Outlined.Check, "On") },
+                                        enabled = writable,
+                                    )
+                                if (canFilter)
+                                    DropdownMenuItem(
+                                        text = { Text("Filter this list") },
+                                        onClick = {
+                                            more = false
+                                            openFilter(filter)
+                                        },
+                                    )
+                                if (filter.active && list.items.isNotEmpty())
+                                    DropdownMenuItem(
+                                        text = { Text("Edit order") },
+                                        onClick = {
+                                            more = false
+                                            confirm(
+                                                Confirmation("Edit order", "Show all items to edit their order.", "Show all items") {
+                                                    val anchor = visibleItems.firstOrNull()
+                                                    clearFilters()
+                                                    if (anchor != null) ui.itemToReveal[list.id] = anchor.id
+                                                }
+                                            )
+                                        },
+                                    )
+                                if (list.hasItemDetails)
+                                    DropdownMenuItem(
+                                        text = { Text(if (showDetails) "Hide item details" else "Show item details") },
+                                        onClick = {
+                                            more = false
+                                            ui.hiddenDetails[list.id] = showDetails
+                                        },
+                                    )
+                                if (organization && (list.places.isNotEmpty() || list.recipients.isNotEmpty()))
+                                    DropdownMenuItem(
+                                        text = { Text("Manage places and people") },
+                                        onClick = {
+                                            more = false
+                                            edit(Editor.Definitions(list))
+                                        },
+                                        enabled = writable,
+                                    )
                                 DropdownMenuItem(
                                     text = { Text("Make a private copy") },
                                     onClick = {
@@ -1185,39 +1340,19 @@ fun DetailScreen(
                     if (!compactHeader)
                         Text(list.title, style = MaterialTheme.typography.headlineLarge)
                     if (list.description.isNotBlank())
-                        Text(
+                        ListDescription(
                             list.description,
+                            if (compactHeader) 2 else 3,
                             style =
                                 if (compactHeader) MaterialTheme.typography.bodyMedium
                                 else MaterialTheme.typography.bodyLarge,
                         )
-                    Text(
-                        when {
-                            list.shared && list.owner -> "Shared · You own this list"
-                            list.shared -> "Shared · Owned by ${list.ownerUsername}"
-                            else -> "Private · Only you have access"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SuggestionChip(
-                            onClick = { edit(Editor.ListForm(list)) },
-                            label = {
-                                Text(if (list.kind == "notes") "Notes & ideas" else "Checklist")
-                            },
-                            enabled = writable,
+                    if (list.shared)
+                        Text(
+                            if (list.owner) "Shared · You own this list" else "Shared · Owned by ${list.ownerUsername}",
+                            style = MaterialTheme.typography.bodySmall,
                         )
-                        if (list.isTemplate)
-                            SuggestionChip(onClick = {}, label = { Text("Template") })
-                        if (list.repeatCadence != "manual")
-                            SuggestionChip(
-                                onClick = {},
-                                label = {
-                                    Text(list.repeatCadence.replaceFirstChar { it.uppercase() })
-                                },
-                            )
-                    }
-                    if (list.kind == "checklist" && !list.isTemplate) {
+                    if (list.kind == "checklist" && !list.isTemplate && list.items.isNotEmpty()) {
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1301,31 +1436,68 @@ fun DetailScreen(
                 }
             }
         }
-        item {
+        if (filter.active)
+            item(key = "active-filters") {
+                Column {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { openFilter(filter) }, modifier = Modifier.weight(1f)) {
+                            Text(filter.summary(list), modifier = Modifier.fillMaxWidth())
+                        }
+                        TextButton(onClick = ::clearFilters) { Text("Clear") }
+                    }
+                    if (filter.place != null && filter.place != FILTER_UNSET) {
+                        val unassigned = list.items.count { it.availability.mode == "unassigned" }
+                        if (unassigned > 0)
+                            TextButton(onClick = { openFilter(filter.copy(place = FILTER_UNSET)) }) {
+                                Text("$unassigned without a place")
+                            }
+                    }
+                }
+            }
+        if (hiddenSaved != null)
+            item(key = "saved-hidden-item") {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Item saved. It isn't shown with these filters.", Modifier.weight(1f))
+                    TextButton(onClick = {
+                        clearFilters()
+                        ui.itemToReveal[list.id] = hiddenSaved
+                    }) { Text("View item") }
+                }
+            }
+        item(key = "capture-item") {
             Row(
                 Modifier.fillMaxWidth().padding(top = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    if (list.kind == "notes") "Notes & ideas" else "Items",
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.weight(1f),
+                OutlinedTextField(
+                    capture,
+                    { ui.itemCapture[list.id] = it.take(500) },
+                    modifier = Modifier.weight(1f).testTag("quick-item-text"),
+                    label = { Text("Add item") },
+                    singleLine = true,
+                    enabled = writable,
+                    shape = RoundedCornerShape(16.dp),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { addItem() }),
                 )
-                TextButton(onClick = { edit(Editor.ItemForm(list)) }, enabled = writable) {
-                    Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Add item")
+                Button(
+                    onClick = addItem,
+                    enabled = writable && capture.isNotBlank(),
+                    modifier = Modifier.testTag("quick-item-add"),
+                ) {
+                    Text("Add")
                 }
             }
         }
-        if (list.items.isEmpty() && list.sections.isEmpty())
+        if (filter.active && visibleItems.isEmpty())
             item {
-                EmptyState(
-                    "No items yet",
-                    "",
-                    if (list.kind == "notes") Icons.Outlined.Lightbulb
-                    else Icons.Outlined.CheckCircleOutline,
-                )
+                Text("No items match these filters.", Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+                TextButton(onClick = ::clearFilters) { Text("Clear filters") }
+            }
+        else if (list.items.isEmpty())
+            item {
+                Text("Add your first item.", Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
             }
         items(unsectioned, key = { it.id }) { item ->
             ItemRow(
@@ -1344,6 +1516,9 @@ fun DetailScreen(
                         )
                 },
                 { edit(Editor.ItemForm(list, item)) },
+                ordinal = ordinals[item.id],
+                description = item.note.takeIf { showDetails }.orEmpty(),
+                detail = if (showDetails) list.itemMetadata(item, filter) else "",
                 modifier =
                     Modifier.animateItem(
                         fadeInSpec = GatherMotion.quick(),
@@ -1352,9 +1527,7 @@ fun DetailScreen(
                     ),
             )
         }
-        list.sections
-            .sortedBy { it.position }
-            .forEach { section ->
+        sections.forEach { section ->
                 item(key = "section-${section.id}") {
                     Row(
                         Modifier.animateItem(
@@ -1372,12 +1545,12 @@ fun DetailScreen(
                             modifier = Modifier.weight(1f),
                         )
                         IconButton(
-                            onClick = { edit(Editor.ItemForm(list, sectionId = section.id)) },
+                            onClick = { edit(Editor.ItemForm(list, sectionId = section.id, filter = filter)) },
                             enabled = writable,
                         ) {
                             Icon(Icons.Outlined.Add, "Add item to ${section.title}")
                         }
-                        IconButton(
+                        if (!filter.active) IconButton(
                             onClick = { edit(Editor.SectionForm(list, section)) },
                             enabled = writable,
                         ) {
@@ -1385,7 +1558,8 @@ fun DetailScreen(
                         }
                     }
                 }
-                items(sortedGroup(list, section.id), key = { it.id }) { item ->
+                val sectionItems = groups[section.id].orEmpty()
+                items(sectionItems, key = { it.id }) { item ->
                     ItemRow(
                         list,
                         item,
@@ -1402,6 +1576,9 @@ fun DetailScreen(
                                 )
                         },
                         { edit(Editor.ItemForm(list, item)) },
+                        ordinal = ordinals[item.id],
+                        description = item.note.takeIf { showDetails }.orEmpty(),
+                        detail = if (showDetails) list.itemMetadata(item, filter) else "",
                         modifier =
                             Modifier.animateItem(
                                 fadeInSpec = GatherMotion.quick(),
@@ -1410,7 +1587,7 @@ fun DetailScreen(
                             ),
                     )
                 }
-                if (sortedGroup(list, section.id).isEmpty())
+                if (sectionItems.isEmpty())
                     item(key = "empty-${section.id}") {
                         Text(
                             "No items in this section",
@@ -1420,18 +1597,6 @@ fun DetailScreen(
                         )
                     }
             }
-        item {
-            OutlinedButton(
-                onClick = { edit(Editor.ItemForm(list)) },
-                enabled = writable,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp),
-                shape = RoundedCornerShape(18.dp),
-            ) {
-                Icon(Icons.Outlined.Add, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Add an item")
-            }
-        }
         if (list.repeatCadence != "manual")
             item {
                 Text(
@@ -1445,12 +1610,34 @@ fun DetailScreen(
 }
 
 @Composable
+private fun ListDescription(description: String, lines: Int, style: androidx.compose.ui.text.TextStyle) {
+    var expanded by remember(description) { mutableStateOf(false) }
+    var truncated by remember(description, lines) { mutableStateOf(false) }
+    Column {
+        Text(
+            description,
+            style = style,
+            maxLines = if (expanded) Int.MAX_VALUE else lines,
+            overflow = TextOverflow.Ellipsis,
+            onTextLayout = { if (!expanded) truncated = it.hasVisualOverflow },
+        )
+        if (expanded || truncated)
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "Show less" else "Show more")
+            }
+    }
+}
+
+@Composable
 fun ItemRow(
     list: GatherList,
     item: ListItem,
     enabled: Boolean,
     toggle: () -> Unit,
     edit: () -> Unit,
+    ordinal: Int?,
+    description: String,
+    detail: String,
     modifier: Modifier = Modifier,
 ) {
     val textColor by
@@ -1483,7 +1670,7 @@ fun ItemRow(
                                 "${if(item.checked)"Uncheck" else "Check"} ${item.text}"
                         },
                 )
-            else
+            else if (ordinal == null)
                 Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
                     Box(
                         Modifier.size(7.dp)
@@ -1492,35 +1679,32 @@ fun ItemRow(
                 }
             Column(Modifier.weight(1f).padding(vertical = 3.dp)) {
                 Text(
-                    item.text,
+                    if (ordinal != null) "$ordinal. ${item.text}" else item.text,
                     style = MaterialTheme.typography.bodyLarge,
                     textDecoration =
                         if (item.checked && list.kind == "checklist") TextDecoration.LineThrough
                         else null,
                     color = textColor,
                 )
-                if (item.note.isNotBlank())
+                if (description.isNotBlank())
                     Text(
-                        item.note,
-                        maxLines = 2,
+                        description,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                if (detail.isNotBlank())
+                    Text(
+                        detail,
+                        maxLines = if (androidx.compose.ui.platform.LocalDensity.current.fontScale > 1.25f) 3 else 1,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 4.dp),
                     )
             }
-            if (item.quantity.isNotBlank())
-                Surface(
-                    color = tint(list.color),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.padding(start = 10.dp),
-                ) {
-                    Text(
-                        item.quantity,
-                        Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
             Icon(
                 Icons.Outlined.ChevronRight,
                 "Edit ${item.text}",

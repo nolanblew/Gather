@@ -100,14 +100,16 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         val message =
-            if (error is ApiFailure) error.message
-            else "Can’t connect to Gather. Check your connection and try again."
+            when {
+                error is ApiFailure && error.code in setOf("ORDER_TOKEN_REQUIRED", "ORDER_CHANGED") ->
+                    "The list order changed. Review the latest order and try again."
+                error is ApiFailure -> error.message
+                interruptedWrite -> "Could not confirm the save. Check the list before trying again."
+                else -> "Can’t connect to Gather. Check your connection and try again."
+            }
         mutable.update {
             it.copy(
-                error =
-                    if (interruptedWrite && error !is ApiFailure)
-                        "$message The request may have reached Gather. Refresh before trying it again."
-                    else message,
+                error = message,
                 connected = error is ApiFailure && it.connected,
             )
         }
@@ -350,7 +352,7 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
                     if (
                         e !is CancellationException &&
                             valid(expected) &&
-                            (e !is ApiFailure || e.status in listOf(403, 404))
+                            (e !is ApiFailure || e.status in listOf(403, 404, 409))
                     )
                         runCatching { workspace(expected) }
                 } finally {
@@ -359,6 +361,13 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
             }
             if (valid(expected) && state.value.query.isNotBlank()) scheduleSearch()
         }
+    }
+
+    fun showSavedItem(listId: String, existingId: String?) {
+        val snapshot = state.value.workspace
+        val itemId = existingId ?: snapshot.createdItemId ?: return
+        val item = snapshot.lists.find { it.id == listId }?.items?.find { it.id == itemId } ?: return
+        if (ui.filters[listId]?.matches(item) == false) ui.hiddenSavedItems[listId] = itemId
     }
 
     fun loadSharing(listId: String) =
@@ -607,7 +616,15 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
             require(document.toByteArray().size <= 5 * 1024 * 1024) {
                 "This backup is larger than 5 MiB."
             }
-            mutation("/api/import", api.json.parseToJsonElement(document))
+            val backup = api.json.parseToJsonElement(document).jsonObject
+            val version = (backup["version"] as? JsonPrimitive)?.intOrNull
+            if (version != null && version > state.value.workspace.version) {
+                mutable.update {
+                    it.copy(error = "This backup needs a newer Gather server. Your lists haven’t changed.")
+                }
+                return
+            }
+            mutation("/api/import", backup)
         } catch (e: Exception) {
             mutable.update {
                 it.copy(

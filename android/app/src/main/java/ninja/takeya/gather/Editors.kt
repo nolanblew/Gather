@@ -81,6 +81,8 @@ fun EditorSheet(
                     when (editor) {
                         is Editor.ListForm -> ListForm(editor.list, state, model, dismiss)
                         is Editor.ItemForm -> ItemForm(editor, state, model, dismiss, onConfirm)
+                        is Editor.Filters -> FilterForm(editor, state, model, dismiss)
+                        is Editor.Definitions -> DefinitionsForm(editor, state, model, dismiss, onConfirm)
                         is Editor.SectionForm ->
                             SectionForm(editor, state, model, dismiss, onConfirm)
                         is Editor.CategoryForm ->
@@ -325,6 +327,8 @@ fun ListForm(list: GatherList?, state: GatherState, model: GatherViewModel, dism
     }
     var template by
         rememberEditorDraft("template") { list?.isTemplate ?: (state.scope == "templates") }
+    var more by rememberEditorDraft("more") { list != null }
+    var showDescription by rememberEditorDraft("show-description") { description.isNotBlank() }
     SheetHeader(
         if (list == null) "New list" else "List details",
         if (list?.owner == false)
@@ -332,7 +336,15 @@ fun ListForm(list: GatherList?, state: GatherState, model: GatherViewModel, dism
         else "",
     )
     FormText(title, { title = it }, "List name", 200, enabled = !state.busy)
-    FormText(description, { description = it }, "Description (optional)", 4000, false, !state.busy)
+    if (list == null)
+        TextButton(onClick = { more = !more }, enabled = !state.busy) {
+            Text(if (more) "Fewer options" else "More options")
+        }
+    if (more) {
+    if (showDescription) FormText(description, { description = it }, "Description", 4000, false, !state.busy)
+    else TextButton(onClick = { showDescription = true }, enabled = !state.busy) {
+        Text("Add description")
+    }
     Choice(
         "List type",
         kind,
@@ -393,7 +405,8 @@ fun ListForm(list: GatherList?, state: GatherState, model: GatherViewModel, dism
         }
         Switch(template, { template = it }, enabled = !state.busy && list?.owner != false)
     }
-    SaveButton(state, if (list == null) "Create list" else "Save changes", title.isNotBlank()) {
+    }
+    SaveButton(state, if (list == null) "Create" else "Save", title.isNotBlank()) {
         val values =
             mutableListOf<Pair<String, Any?>>(
                 "title" to title.trim(),
@@ -420,126 +433,6 @@ fun ListForm(list: GatherList?, state: GatherState, model: GatherViewModel, dism
 }
 
 @Composable
-fun ItemForm(
-    editor: Editor.ItemForm,
-    state: GatherState,
-    model: GatherViewModel,
-    dismiss: () -> Unit,
-    confirm: (Confirmation) -> Unit,
-) {
-    val list = state.workspace.lists.firstOrNull { it.id == editor.list.id } ?: editor.list
-    val item = editor.item
-    var text by rememberEditorDraft("text") { item?.text ?: "" }
-    var quantity by rememberEditorDraft("quantity") { item?.quantity ?: "" }
-    var note by rememberEditorDraft("note") { item?.note ?: "" }
-    var section by rememberEditorDraft("section") { item?.sectionId ?: editor.sectionId ?: "" }
-    LaunchedEffect(list.sections) {
-        if (section.isNotBlank() && list.sections.none { it.id == section }) section = ""
-    }
-    SheetHeader(if (item == null) "Add item" else "Item details", list.title)
-    FormText(text, { text = it }, "Item", 500, false, !state.busy, minLines = 1)
-    FormText(quantity, { quantity = it }, "Quantity (optional)", 100, enabled = !state.busy)
-    FormText(note, { note = it }, "Notes (optional)", 4000, false, !state.busy, minLines = 2)
-    if (list.sections.isNotEmpty())
-        Choice(
-            "Section",
-            section,
-            listOf("" to "No section") +
-                list.sections.sortedBy { it.position }.map { it.id to it.title },
-            !state.busy,
-        ) {
-            section = it
-        }
-    SaveButton(state, if (item == null) "Add item" else "Save changes", text.isNotBlank()) {
-        val values =
-            mutableListOf<Pair<String, Any?>>(
-                "listId" to list.id,
-                "text" to text.trim(),
-                "quantity" to quantity,
-                "note" to note,
-                "sectionId" to section.ifBlank { null },
-            )
-        if (item != null) values.add("itemId" to item.id)
-        model.action(
-            if (item == null) "item.create" else "item.update",
-            payload(*values.toTypedArray()),
-            onSuccess = dismiss,
-        )
-    }
-    if (item != null) {
-        val group = sortedGroup(list, item.sectionId)
-        val index = group.indexOfFirst { it.id == item.id }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(
-                onClick = {
-                    model.action(
-                        "item.move",
-                        payload(
-                            "listId" to list.id,
-                            "itemId" to item.id,
-                            "sectionId" to item.sectionId,
-                            "index" to index - 1,
-                        ),
-                        onSuccess = dismiss,
-                    )
-                },
-                enabled = index > 0 && !state.busy && state.connected,
-                modifier = Modifier.weight(1f),
-            ) {
-                Icon(Icons.Outlined.ArrowUpward, null, Modifier.size(18.dp))
-                Text("Move up")
-            }
-            OutlinedButton(
-                onClick = {
-                    model.action(
-                        "item.move",
-                        payload(
-                            "listId" to list.id,
-                            "itemId" to item.id,
-                            "sectionId" to item.sectionId,
-                            "index" to index + 1,
-                        ),
-                        onSuccess = dismiss,
-                    )
-                },
-                enabled = index >= 0 && index < group.lastIndex && !state.busy && state.connected,
-                modifier = Modifier.weight(1f),
-            ) {
-                Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(18.dp))
-                Text("Move down")
-            }
-        }
-        TextButton(
-            onClick = {
-                confirm(
-                    Confirmation(
-                        "Delete this item?",
-                        "“${item.text}” will be removed${if(list.shared)" for everyone" else ""}.",
-                        "Delete item",
-                        true,
-                    ) {
-                        model.action(
-                            "item.delete",
-                            payload("listId" to list.id, "itemId" to item.id),
-                            onSuccess = dismiss,
-                        )
-                    }
-                )
-            },
-            enabled = !state.busy && state.connected,
-            colors =
-                ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Delete item")
-        }
-    }
-    TextButton(onClick = dismiss, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-        Text("Cancel")
-    }
-}
-
-@Composable
 fun SectionForm(
     editor: Editor.SectionForm,
     state: GatherState,
@@ -555,7 +448,7 @@ fun SectionForm(
     SaveButton(state, if (section == null) "Add section" else "Save changes", title.isNotBlank()) {
         model.action(
             if (section == null) "section.create" else "section.update",
-            if (section == null) payload("listId" to list.id, "title" to title.trim())
+            if (section == null) list.orderedPayload("title" to title.trim())
             else payload("listId" to list.id, "sectionId" to section.id, "title" to title.trim()),
             onSuccess = dismiss,
         )
@@ -568,8 +461,7 @@ fun SectionForm(
                 onClick = {
                     model.action(
                         "section.move",
-                        payload(
-                            "listId" to list.id,
+                        list.orderedPayload(
                             "sectionId" to section.id,
                             "index" to index - 1,
                         ),
@@ -585,8 +477,7 @@ fun SectionForm(
                 onClick = {
                     model.action(
                         "section.move",
-                        payload(
-                            "listId" to list.id,
+                        list.orderedPayload(
                             "sectionId" to section.id,
                             "index" to index + 1,
                         ),
@@ -609,7 +500,7 @@ fun SectionForm(
                     ) {
                         model.action(
                             "section.delete",
-                            payload("listId" to list.id, "sectionId" to section.id),
+                            list.orderedPayload("sectionId" to section.id),
                             onSuccess = dismiss,
                         )
                     }
@@ -934,6 +825,7 @@ fun PasswordForm(state: GatherState, model: GatherViewModel, dismiss: () -> Unit
 fun CaptureForm(state: GatherState, model: GatherViewModel, dismiss: () -> Unit) {
     var text by rememberEditorDraft("text") { state.capture?.take(500) ?: "" }
     var note by rememberEditorDraft("note") { state.capture?.drop(500) ?: "" }
+    var showDescription by rememberEditorDraft("show-description") { note.isNotBlank() }
     var selected by
         rememberEditorDraft("selected") {
             state.workspace.lists.firstOrNull { !it.archived && !it.isTemplate }?.id ?: ""
@@ -951,16 +843,24 @@ fun CaptureForm(state: GatherState, model: GatherViewModel, dismiss: () -> Unit)
             selected = it
         }
         FormText(text, { text = it }, "Item", 500, false, !state.busy)
-        FormText(note, { note = it }, "Notes (optional)", 4000, false, !state.busy)
+        if (showDescription)
+            FormText(note, { note = it }, "Description", 4000, false, !state.busy)
+        else TextButton(onClick = { showDescription = true }, enabled = !state.busy) {
+            Text("Add description")
+        }
         SaveButton(
             state,
             "Add to list",
             text.isNotBlank() && choices.any { it.first == selected },
         ) {
+            val list = state.workspace.lists.firstOrNull { it.id == selected } ?: return@SaveButton
             model.action(
                 "item.create",
-                payload("listId" to selected, "text" to text.trim(), "note" to note),
-                onSuccess = dismiss,
+                list.orderedPayload("text" to text.trim(), "note" to note),
+                onSuccess = {
+                    model.showSavedItem(list.id, null)
+                    dismiss()
+                },
             )
         }
     }

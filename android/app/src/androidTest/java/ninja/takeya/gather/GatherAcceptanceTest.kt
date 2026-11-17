@@ -89,10 +89,7 @@ class GatherAcceptanceTest {
         assertTrue(fixture.list(title)!!.getString("id").isNotBlank())
         val listId = fixture.list(title)!!.getString("id")
 
-        scrollText("Add item")
-        click("Add item")
-        editorText("editor-item-text", original)
-        saveEditor()
+        quickAdd(original)
         awaitStored("created item") { fixture.item(title, original) != null }
         scrollDescription("Check $original")
         clickDescription("Check $original")
@@ -737,6 +734,177 @@ class GatherAcceptanceTest {
                 compose.mainClock.autoAdvance = true
             }
         }
+    }
+
+    @Test fun organizationKeepsPlainCaptureAndFiltersCanonicalNumberedItems() {
+        val fixture = LocalAcceptanceFixture()
+        signIn(fixture)
+        val title = "Organization ${fixture.runId}"
+        click("New list")
+        editorText("editor-title", title)
+        compose.onNodeWithText("More options").assertExists()
+        compose.onAllNodesWithText("List type").assertCountEquals(0)
+        saveEditor()
+        awaitStored("simple list creation") { fixture.list(title) != null }
+        scrollDescription("List options")
+        clickDescription("List options")
+        compose.onAllNodesWithText("Filter this list").assertCountEquals(0)
+        click("Number items")
+        awaitStored("shared numbering") { fixture.list(title)?.optBoolean("numbered") == true }
+        quickAdd("Tea")
+        awaitStored("Tea") { fixture.item(title, "Tea") != null }
+        quickAdd("Paper")
+        awaitStored("Paper") { fixture.item(title, "Paper") != null }
+        quickAdd("Mug")
+        awaitStored("Mug") { fixture.item(title, "Mug") != null }
+
+        scrollText("1. Tea")
+        click("1. Tea")
+        waitTag("editor-item-text")
+        compose.onAllNodesWithText("Quantity").assertCountEquals(0)
+        compose.onAllNodesWithText("Places").assertCountEquals(0)
+        click("Add detail")
+        captureOrganizationScreenshot("organization-add-detail")
+        click("Place")
+        editorText("field-Search places", "Cancelled draft")
+        click("Create “Cancelled draft”")
+        click("Done")
+        click("Cancel")
+        assertFalse(fixture.list(title)?.optJSONArray("places").toString().contains("Cancelled draft"))
+
+        scrollText("1. Tea")
+        click("1. Tea")
+        click("Add description")
+        val description = "Green tea.\n\nLook for a small tin."
+        editorText("field-Description", description)
+        closeSoftKeyboard()
+        click("Add detail")
+        click("Place")
+        editorText("field-Search places", "Kyoto")
+        click("Create “Kyoto”")
+        editorText("field-Search places", "Tokyo")
+        click("Create “Tokyo”")
+        click("Done")
+        click("Add detail")
+        click("For someone")
+        editorText("field-Search people", "Maya")
+        click("Create “Maya”")
+        click("Done")
+        saveEditor()
+        awaitStored("atomic places, person and description") {
+            val list = fixture.list(title) ?: return@awaitStored false
+            val item = fixture.item(title, "Tea") ?: return@awaitStored false
+            list.getJSONArray("places").length() == 2 &&
+                list.getJSONArray("recipients").length() == 1 &&
+                item.getJSONObject("availability").getJSONArray("placeIds").length() == 2 &&
+                item.getString("recipientId") == list.getJSONArray("recipients").getJSONObject(0).getString("id") &&
+                item.getString("note") == description
+        }
+        scrollText("1. Tea")
+        click("1. Tea")
+        waitTag("field-Description")
+        compose.onNodeWithTag("field-Description").assertTextContains(description)
+        click("Cancel")
+
+        val stored = checkNotNull(fixture.list(title))
+        val listId = stored.getString("id")
+        val personId = stored.getJSONArray("recipients").getJSONObject(0).getString("id")
+        val mugId = checkNotNull(fixture.item(title, "Mug")).getString("id")
+        fixture.action("item.update", json(
+            "listId" to listId, "itemId" to mugId, "checked" to true,
+            "availability" to json("mode" to "anywhere", "placeIds" to org.json.JSONArray()),
+            "expectedAvailability" to json("mode" to "unassigned", "placeIds" to org.json.JSONArray()),
+            "recipientId" to personId, "expectedRecipientId" to JSONObject.NULL,
+        ))
+        val model = viewModel()
+        compose.runOnIdle { model.refresh() }
+        compose.waitUntil(20_000) { model.state.value.selected?.checkedCount == 1 }
+        scrollText("3. Mug")
+        compose.onNodeWithText("3. Mug").assertIsDisplayed()
+
+        scrollDescription("List options")
+        clickDescription("List options")
+        click("Filter this list")
+        captureOrganizationScreenshot("organization-filters")
+        click("All places")
+        click("Kyoto")
+        click("No filter")
+        click("Maya")
+        click("Apply")
+        waitText("Kyoto · Maya · 2 shown")
+        scrollText("3. Mug")
+        compose.onNodeWithText("3. Mug").assertIsDisplayed()
+        compose.onAllNodesWithText("2. Paper").assertCountEquals(0)
+        scrollText("Kyoto · Maya · 2 shown")
+        click("Kyoto · Maya · 2 shown")
+        click("All items")
+        click("Not done")
+        click("Apply")
+        waitText("Kyoto · Maya · Not done · 1 shown")
+        compose.onAllNodesWithText("3. Mug").assertCountEquals(0)
+        scrollText("1. Tea")
+        compose.onNodeWithText("1. Tea").assertIsDisplayed()
+        captureOrganizationScreenshot("organization-filtered-list")
+
+        click("1. Tea")
+        click("Item actions")
+        click("Edit order")
+        click("Show all items")
+        click("Move down")
+        awaitStored("move in full order") {
+            fixture.item(title, "Tea")?.optInt("position") == 1 &&
+                fixture.item(title, "Paper")?.optInt("position") == 0
+        }
+        click("Done")
+        click("Cancel")
+        scrollText("2. Tea")
+        compose.onNodeWithText("2. Tea").assertIsDisplayed()
+
+        val placesOnly = fixture.action("list.create", json("title" to "Japan finds ${fixture.runId}"))
+            .getString("createdListId")
+        fixture.action("item.create", json(
+            "listId" to placesOnly, "text" to "Matcha tin",
+            "availability" to json("mode" to "selected", "placeIds" to org.json.JSONArray()),
+            "newPlaces" to org.json.JSONArray().put(json("name" to "Kyoto")).put(json("name" to "Tokyo")),
+        ))
+        fixture.action("item.create", json("listId" to placesOnly, "text" to "Stationery"))
+        compose.runOnIdle { model.refresh() }
+        compose.waitUntil(20_000) { model.state.value.workspace.lists.any { it.id == placesOnly } }
+        compose.runOnIdle { model.select(placesOnly) }
+        waitTag("page-detail:$placesOnly")
+        scrollDescription("List options")
+        clickDescription("List options")
+        click("Filter this list")
+        waitText("Places")
+        compose.onAllNodesWithText("For someone").assertCountEquals(0)
+        compose.onAllNodesWithText("Not done").assertCountEquals(0)
+        click("Kyoto")
+        waitText("1 item matches")
+        captureOrganizationScreenshot("organization-places-only-filter")
+        click("Cancel")
+        scrollText("Stationery")
+        compose.onNodeWithText("Stationery").assertIsDisplayed()
+    }
+
+    private fun captureOrganizationScreenshot(name: String) {
+        compose.waitForIdle()
+        // The platform dialog window can still be fading after Compose has settled.
+        SystemClock.sleep(500)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        val dir = File(instrumentation.targetContext.getExternalFilesDir(null), "acceptance").apply { mkdirs() }
+        val screenshot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        try {
+            File(dir, "$name.png").outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        } finally {
+            screenshot.recycle()
+        }
+    }
+
+    private fun quickAdd(text: String) {
+        scrollTo(hasTestTag("quick-item-text"), "Add item")
+        compose.onNodeWithTag("quick-item-text").performTextReplacement(text)
+        compose.onNodeWithTag("quick-item-add").performClick()
     }
 
     private fun authIndicatorLeft() = compose.onNodeWithTag("auth-mode-indicator", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot.left

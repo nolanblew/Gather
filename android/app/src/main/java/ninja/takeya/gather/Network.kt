@@ -80,7 +80,7 @@ class TokenVault(context: Context) {
     }
 }
 
-class ApiFailure(val status: Int, message: String) : IOException(message)
+class ApiFailure(val status: Int, message: String, val code: String? = null) : IOException(message)
 
 class GatherApi {
     val json = Json {
@@ -140,19 +140,16 @@ class GatherApi {
                                     throw IOException("The response is too large to open.")
                                 val raw = String(bytes, Charsets.UTF_8)
                                 if (!it.isSuccessful) {
-                                    val message =
+                                    val details =
                                         runCatching {
-                                                json
-                                                    .parseToJsonElement(raw)
-                                                    .jsonObject["error"]
-                                                    ?.jsonPrimitive
-                                                    ?.content
+                                                json.parseToJsonElement(raw).jsonObject
                                             }
                                             .getOrNull()
                                     throw ApiFailure(
                                         it.code,
-                                        message
+                                        (details?.get("error") as? JsonPrimitive)?.contentOrNull
                                             ?: "Gather couldn’t complete that request (${it.code}).",
+                                        (details?.get("code") as? JsonPrimitive)?.contentOrNull,
                                     )
                                 }
                                 if (continuation.isActive) continuation.resume(raw)

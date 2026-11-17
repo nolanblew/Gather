@@ -4,6 +4,12 @@
 
 Gather is a responsive home for everyday lists, gift ideas, projects, and reusable trip checklists. The phone layout emphasizes quick capture and checking things off; desktop adds persistent navigation and a spacious library.
 
+## Optional organization
+
+Start with an ordinary list and add details only when useful. **Add detail** offers descriptions, alternative places, a person an item is for, quantity and sections. Places and people belong to that list. **Filter this list** shows relevant choices; **Number items** adds shared numbering for priorities and sequences. Descriptions support multiple paragraphs.
+
+See the [product requirements](docs/TRIP-ORGANIZATION-PRD.md), [technical design](docs/TRIP-ORGANIZATION-TDR.md), and [implementation checks](docs/ORGANIZATION-IMPLEMENTATION-VERIFICATION.md). This feature uses workspace version 3; update the server before clients. Automatic location suggestions remain future work.
+
 ## Native Android app
 
 The native Kotlin/Jetpack Compose app in [`android/`](android/README.md) supports **Android 14 and newer**. Its signed release uses **https://gather.takeya.ninja/** and shares accounts, lists, templates, search, invitations, and backups with the web client. It includes Paper, Cloud, Forest, Midnight and System appearance, native sharing and text capture, animated progress, and Android file pickers for JSON backups.

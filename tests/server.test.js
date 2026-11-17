@@ -169,13 +169,34 @@ test('create and clone return exact created list metadata without persisting it'
   await f.restart();
   assert.equal(Object.hasOwn((await f.request('/api/workspace')).value,'createdListId'),false);
 });
+test('organization capabilities and coded order conflicts are exposed through the shared API', async t => {
+  const f = await fixture(t);
+  const { value: capabilities } = await f.request('/api/capabilities');
+  assert.equal(capabilities.apiVersion, 1);
+  assert.equal(capabilities.workspaceVersion, 3);
+  for (const feature of ['list-organization', 'numbered-lists', 'guarded-order']) assert.ok(capabilities.features.includes(feature));
+  const created = await f.action('list.create', { title: 'Checklist', numbered: true });
+  const list = created.lists.find(entry => entry.id === created.createdListId);
+  const submit = payload => f.request('/api/actions', { type: 'item.create', payload: { listId: list.id, text: 'Bring a pen', ...payload } });
+  const missing = await submit({});
+  assert.equal(missing.status, 409);
+  assert.equal(missing.value.code, 'ORDER_TOKEN_REQUIRED');
+  const succeeded = await submit({ expectedOrderToken: list.orderToken });
+  assert.equal(succeeded.status, 200);
+  assert.ok(succeeded.value.createdItemId);
+  const stale = await submit({ expectedOrderToken: list.orderToken });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.value.code, 'ORDER_CHANGED');
+  const updated = await f.action('item.update', { listId: list.id, itemId: succeeded.value.createdItemId, checked: true, sectionId: null });
+  assert.equal(updated.lists.find(entry => entry.id === list.id).items[0].checked, true);
+});
 function legacyWorkspace() {
   const workspace = seedWorkspace(); workspace.version = 1;
   workspace.lists.forEach(l=>{delete l.kind; delete l.repeatCadence;});
   return workspace;
 }
 function migratedWorkspace(v1) {
-  return {...v1,version:2,lists:v1.lists.map(l=>({...l,kind:'checklist',repeatCadence:'manual'}))};
+  return {...v1,version:3,lists:v1.lists.map(l=>({...l,kind:'checklist',repeatCadence:'manual'}))};
 }
 function writeLegacyDatabase(dir, workspace) {
   const db = new DatabaseSync(join(dir,'gather.sqlite'));

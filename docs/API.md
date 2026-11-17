@@ -47,9 +47,9 @@ Store the native token using Android Keystore-backed encrypted application-priva
 
 Native clients send JSON for POSTs and omit browser `Origin`, `Sec-Fetch-Site` and cookies. Native routes and bearer-authenticated reads enforce the same origin validation as writes: supplied cross-site origins/Fetch Metadata are rejected, and no cross-origin CORS access is enabled. Tokens are accepted only in Authorization headers, never query parameters or request bodies. TLS termination remains the responsibility of the deployment proxy.
 
-`GET /api/capabilities` is a public, non-cacheable compatibility probe returning `{ "apiVersion": 1, "workspaceVersion": 2, "authentication": ["cookie", "bearer"], "features": ["sharing", "search", "import", "export"] }`. `apiVersion` describes this HTTP contract independently of backup `version`. Native clients should verify bearer support before presenting sign-in against a configured server.
+`GET /api/capabilities` is a public, non-cacheable compatibility probe returning `{ "apiVersion": 1, "workspaceVersion": 3, "authentication": ["cookie", "bearer"], "features": ["sharing", "search", "import", "export", "list-organization", "numbered-lists", "guarded-order"] }`. `apiVersion` describes this HTTP contract independently of backup `version`. Native clients should verify bearer support before presenting sign-in against a configured server. Clients should also check feature support before offering organization controls or sending a version 3 backup.
 
-All URLs are same-origin. Errors have `{ "error": "Human-readable message" }` and a non-2xx status. Writes require JSON, are limited to 5 MiB, and reject cross-site origins. Auth, invitation and sharing bodies are limited to 8 KiB. Vite's development proxy must preserve the incoming Host (`changeOrigin: false`). A successful list mutation returns the account's authoritative workspace. Clients send granular commands and serialize pending actions. Identity and permissions come from the session, never from submitted owner fields.
+All URLs are same-origin. Errors have `{ "error": "Human-readable message" }`, an optional `code`, and a non-2xx status. Writes require JSON, are limited to 5 MiB, and reject cross-site origins. Auth, invitation and sharing bodies are limited to 8 KiB. Vite's development proxy must preserve the incoming Host (`changeOrigin: false`). A successful list mutation returns the account's authoritative workspace. Clients send granular commands and serialize pending actions. Identity and permissions come from the session, never from submitted owner fields.
 
 ## Sharing endpoints
 
@@ -67,13 +67,13 @@ Every endpoint below requires a session. List IDs are not authorization. Only ow
 
 Invite links use `/#invite=TOKEN`; the client removes the fragment and retains it only for the current tab's sign-in flow. Preview and join send the token in a JSON body so it does not enter URL access logs. Only token hashes persist. Links expire after seven days and are consumed atomically by one new member. A successful recipient retry is idempotent while membership remains valid. An existing member/owner does not consume a pending invitation. Removed or departed members cannot use a previously consumed token to regain access.
 
-Workspace list records additionally include `role` (`owner` or `editor`), `ownerUsername` and `shared`. These are response metadata and are never trusted from imports. Editors may edit content, reset checkmarks and create private copies. Only owners may delete a canonical list or change kind, cadence or template status. Favorites, categories, ordering and archive state are personal, including for the owner. Item and section IDs must belong to the authorized list; category IDs must belong to the actor.
+Workspace list records additionally include `role` (`owner` or `editor`), `ownerUsername`, `shared` and `orderToken`. These fields are response metadata. Editors may edit content and list-local place and person labels, reset checkmarks and create private copies. Only owners may delete a canonical list or change numbering, kind, cadence or template status. Favorites, categories, library order and archive state are personal, including for the owner. Item, section, place and recipient IDs must belong to the authorized list. Category IDs must belong to the actor.
 
 `GET /api/workspace` returns owned and joined lists. `GET /api/export` returns only owned list snapshots and personal categories, omitting sharing metadata, members and secrets. Their common document shape is:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "categories": [{"id":"uuid","name":"Everyday","color":"sage","position":0}],
   "lists": [{
     "id":"uuid", "title":"Groceries", "description":"", "icon":"basket", "color":"sage",
@@ -90,37 +90,61 @@ IDs are globally unique. `categoryId` and `sectionId` may be null. Items belong 
 
 `POST /api/actions` accepts `{ "type": "item.create", "payload": {...} }`:
 
-Successful `list.create` and `list.clone` responses include an additional ephemeral `createdListId` alongside the full workspace fields. This is the exact list ID created by that command, so clients can select their own new list even when another client concurrently creates a list. It is response metadata only: GET workspace, export, and stored backup documents never include it.
+Successful creation commands return the full workspace plus the exact ID created by the command. `list.create` and `list.clone` return `createdListId`. `item.create`, `place.create` and `recipient.create` return `createdItemId`, `createdPlaceId` and `createdRecipientId` respectively. These IDs appear only on the successful command response.
 
 | Type | Payload |
 | --- | --- |
 | category.create | name, color? |
 | category.update | categoryId, name?, color? |
 | category.delete | categoryId; lists become uncategorized |
-| list.create | title, description?, icon?, color?, categoryId?, favorite?, archived?, isTemplate?, kind?, repeatCadence? |
-| list.update | listId and any editable property from list.create |
+| list.create | title, description?, icon?, color?, categoryId?, favorite?, archived?, isTemplate?, kind?, repeatCadence?, numbered? |
+| list.update | listId, editable properties from list.create, expectedOrderToken for a numbering change |
 | list.delete | listId |
 | list.clone | listId, title? |
 | list.reset | listId; resets completion only; active checklist working lists only |
-| section.create | listId, title |
+| section.create | listId, title, expectedOrderToken on numbered lists |
 | section.update | listId, sectionId, title |
-| section.delete | listId, sectionId; items append to unsectioned group |
-| section.move | listId, sectionId, index (zero-based within sections) |
-| item.create | listId, text, quantity?, note?, checked?, sectionId? |
-| item.update | listId, itemId, text?, quantity?, note?, checked?, sectionId? |
-| item.delete | listId, itemId |
-| item.move | listId, itemId, sectionId, index (zero-based insertion index within destination group) |
+| section.delete | listId, sectionId, expectedOrderToken on numbered lists. Items append to the unsectioned group. |
+| section.move | listId, sectionId, index (zero-based within sections), expectedOrderToken on numbered lists |
+| item.create | listId, text, quantity?, note?, checked?, sectionId?, availability?, recipientId?, newPlaces?, newRecipient?, expectedOrderToken on numbered lists |
+| item.update | listId, itemId, text?, quantity?, note?, checked?, sectionId?, availability?, recipientId?, newPlaces?, newRecipient?, expectedAvailability or expectedRecipientId for corresponding edits, expectedOrderToken when changing sections on numbered lists |
+| item.delete | listId, itemId, expectedOrderToken on numbered lists |
+| item.move | listId, itemId, sectionId, index (zero-based insertion index within destination group), expectedOrderToken on numbered lists |
+| place.create | listId, name, kind?, region?, countryCode? |
+| place.update | listId, placeId, name?, kind?, region?, countryCode? |
+| place.delete | listId, placeId, expectedAssignmentToken |
+| recipient.create | listId, name |
+| recipient.update | listId, recipientId, name? |
+| recipient.delete | listId, recipientId, expectedAssignmentToken |
 | samples.remove | empty object |
 
 New lists default to icon `list`, color `sage`, no category, kind `checklist`, repeatCadence `manual`, and all flags false. `isSample` is server-owned. Kind is `checklist` or `notes`; cadence is `manual`, `daily`, or `weekly`. Cadence is metadata only, with no automatic resets. Kind changes preserve every item, including historical checked flags, and cadence. Notes reject all item.update checked properties and checked:true on item.create (omitted/false is allowed); ordinary content edits and moves remain available. Reset rejects notes, template masters, and archived lists. Imports may retain checked history on notes. Clone generates independent child IDs, inherits kind/cadence and content/presentation, and resets completion, favorite, archive, template, and sample flags. Default clone title is `Title (copy)` for ordinary lists or `Title — Sep 29, 2026` for templates (server local date). The client may provide its local dated title.
 
-`POST /api/import` accepts a full version-1 or version-2 document and atomically adds private copies after complete validation. All list, item, section and category IDs are remapped; existing lists and memberships remain unchanged. Completion history is preserved, and no sharing permissions are imported. Version 1 always migrates each list to checklist/manual, preserving all existing content and metadata. Version 2 requires valid kind/cadence on every list; missing fields reject. Unknown properties are discarded. Limits: 100 categories, 1000 lists, 100 sections/list, 5000 items/list, 20000 total items; title/section title 200 characters, category name 80, item text 500, quantity 100, notes/descriptions 4000, icon 40. Required text rejects whitespace-only input. Malformed JSON, duplicate IDs, invalid parent references, invalid flags, positions, colors, dates, kind/cadence, and limit breaches reject the whole import. Export is always version 2 and includes all samples, archived lists, templates, historical completion, timestamps, and metadata. Confirm restore/destructive actions in the UI before sending.
+### Places, people and ordering
+
+Version 3 adds optional `numbered`, `places` and `recipients` fields to each list. Omitted values mean `false`, `[]` and `[]` respectively. A place has `{ id, name, kind, region, countryCode }`. Its kind is `city`, `store`, `home`, `work`, `online` or `other` (default). Region and country code default to empty strings. A country code, when present, contains two uppercase ASCII letters. A recipient has `{ id, name }` and is a label for who the item is for. These labels have no effect on sharing or notifications. Limits are 100 places per list, 200 recipients per list, and 100 characters each for label names and regions after trimming and collapsing whitespace.
+
+An item can have `availability: { mode, placeIds }` and `recipientId`. Availability defaults to `{ mode: 'unassigned', placeIds: [] }` and the recipient defaults to null. `unassigned` and `anywhere` both require an empty ID array. `selected` requires 1–25 distinct IDs from the enclosing list. The server stores IDs in lexical order. Omitted fields on `item.update` preserve the current values. To clear a field, send unassigned availability or `recipientId: null`.
+
+An item command can create definitions and assign them in the same transaction. Send `newPlaces: [{ name, kind?, region?, countryCode? }]` with `availability: { mode: 'selected', placeIds }`. In this form `placeIds` can start empty. The saved set combines the existing selections and the newly resolved IDs. Send `newRecipient: { name }` with a null or omitted `recipientId`. Inline creation can reuse one unambiguous matching label in the list. Matching is case-insensitive after Unicode NFC and whitespace normalization, and optional place qualifiers narrow the match when supplied. Ambiguous matches require the client to choose an existing entry or disambiguate. Standalone place creation treats the whole `(name, kind, region, countryCode)` tuple as the duplicate key. Standalone recipients use name. Imported duplicate labels are preserved.
+
+When changing an assignment on `item.update`, send its last displayed value as `expectedAvailability` or `expectedRecipientId`. Availability ID ordering is ignored for comparison. Both comparisons run before any inline definitions are saved. A stale or missing expectation returns `409 ASSIGNMENT_CHANGED` and leaves the command unapplied.
+
+Place deletion removes that ID from assigned items and becomes unassigned when the last selected place is removed. Recipient deletion clears references to the label. To guard the confirmation, compute `expectedAssignmentToken` as lowercase hex SHA-256 over the UTF-8 JSON serialization of `[entityType, id, definition, affectedPairs]`. The entity type is `place` or `recipient`. Definition keys are in the order `id`, `name`, `kind`, `region`, `countryCode` for places and `id`, `name` for recipients. Include default place values. Affected pairs are `[itemId, availability]` for a place or `[itemId, recipientId]` for a recipient, sorted lexically by item ID. Availability keys are `mode`, then `placeIds`, with IDs sorted lexically. A stale token returns `409 ASSIGNMENT_CHANGED`. Recompute the affected count before requesting confirmation again.
+
+The response `orderToken` is derived from the list ID, numbered flag, ordered section IDs including empty sections, and item IDs in each group. Traverse the unsectioned group first, then sections in position order. Equal positions retain array order. Display numbers densely from 1 using the full traversal, with checked rows inline. A numbered structural command and every actual numbering toggle require the displayed `expectedOrderToken`. A missing token returns `409 ORDER_TOKEN_REQUIRED`. A stale token returns `409 ORDER_CHANGED`. Structural commands include item and section creation, deletion and moves, plus `item.update` when the section actually changes. Scalar edits, completion, resets and assignments do not change the token. Refresh on conflicts, preserve the user's draft, and wait for explicit action before retrying.
+
+### Backup compatibility
+
+`POST /api/import` accepts full version 1, 2 and 3 documents and atomically adds private copies after complete validation. List, item, section, category, place and recipient IDs and references are remapped. Import preserves completion history. Clone remaps its children and preserves numbering, definitions and assignments while clearing completion. Version 1 migrates each list to checklist/manual. Version 2 requires valid kind and cadence. Version 3 validates explicit organization fields, including references and duplicate IDs. Unknown properties are discarded. Limits are 100 categories, 1000 lists, 100 sections per list, 5000 items per list and 20000 total items. Text limits are 200 characters for list and section titles, 80 for category names, 500 for item text, 100 for quantity, 4000 for notes and descriptions, and 40 for icons. Required text rejects whitespace-only input. Malformed JSON and invalid documents reject the whole import.
+
+Exports are version 3 with sparse default organization fields. They include owned list content, including place and recipient labels, samples, archived lists, templates, completion history and timestamps. Account records, sharing metadata, conflict tokens and personal display filters are excluded. Keep the original version number when transferring backups.
 
 `GET /api/health` returns `{ "status": "ok" }` after checking database readability.
 
 The complete persisted/exported JSON workspace is also limited to 5 MiB in UTF-8 bytes so every exported document remains importable. Growing actions that exceed this aggregate limit reject with status 413 and roll back entirely. The error directs the user to remove content or shorten notes; reducing actions remain available. Import validates the same byte limit, including direct store use.
 
-The Node server entry is `server/index.js`. `HOST` defaults to `127.0.0.1`, `PORT` to `3000`, `DATA_DIR` to `./data`. The built frontend is served from `./dist` with SPA navigation fallback. SQLite stores the workspace document in a durable WAL database, with granular server commands applied inside `BEGIN IMMEDIATE` transactions. Existing v1 databases migrate atomically at startup without changing IDs, text, checks, positions, timestamps, or sample removals. Only new databases seed seven samples, including Birthday gift ideas, Christmas plans, and Project ideas as notes. Empty or sample-free documents remain authoritative after restart. Persist the whole data directory (database and WAL files) in Docker.
+The Node server entry is `server/index.js`. `HOST` defaults to `127.0.0.1`, `PORT` to `3000`, `DATA_DIR` to `./data`. The built frontend is served from `./dist` with SPA navigation fallback. SQLite stores the workspace document in a durable WAL database, with granular server commands applied inside `BEGIN IMMEDIATE` transactions. Existing version 1 and 2 account documents migrate atomically at startup, preserving IDs, text, checks, positions, timestamps, memberships and preferences. Empty or sample-free documents remain authoritative after restart. Persist the whole data directory (database and WAL files) in Docker.
 
 `POST /api/search` is a read-only retrieval operation with the same origin/JSON/body checks as other POST endpoints. Payload: `{ "query": "USB-C cable", "scope": "library", "categoryId": null, "limit": 60 }`. Query is text up to 500 characters; scope is `library`, `favorites`, `templates`, `archive`, or explicit `all`; categoryId is null/omitted or an existing category ID; limit is an integer 1–125 (default 60). Results are scoped before ranking. Library/favorites exclude templates and archived lists. Search never changes workspace data.
 

@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createUserStore, InputError, WORKSPACE_BYTE_LIMIT } from './store.mjs';
+import { createUserStore, InputError, WORKSPACE_BYTE_LIMIT, WORKSPACE_VERSION } from './store.mjs';
 import { createSearchService } from './search.mjs';
 import { createAuth } from './auth.mjs';
 
@@ -46,7 +46,7 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
           if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) throw new InputError('Use application/json.', 415);
         }
         if (req.method === 'GET' && url.pathname === '/api/health') { store.health(); return json(200, { status: 'ok' }); }
-        if (req.method === 'GET' && url.pathname === '/api/capabilities') return json(200, { apiVersion: 1, workspaceVersion: 2, authentication: ['cookie', 'bearer'], features: ['sharing', 'search', 'import', 'export'] });
+        if (req.method === 'GET' && url.pathname === '/api/capabilities') return json(200, { apiVersion: 1, workspaceVersion: WORKSPACE_VERSION, authentication: ['cookie', 'bearer'], features: ['sharing', 'search', 'import', 'export', 'list-organization', 'numbered-lists', 'guarded-order'] });
         if (url.pathname.startsWith('/api/native/auth/')) {
           const method=url.pathname.slice('/api/native/auth/'.length);
           if (method==='session' && req.method==='GET') return json(200,auth.session(req,'bearer'));
@@ -107,7 +107,12 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
       res.setHeader('Content-Type', mime[extname(file)] || 'application/octet-stream');
       res.setHeader('Cache-Control', extname(file) === '.html' || url.pathname === '/sw.js' || extname(file) === '.webmanifest' ? 'no-cache' : 'public, max-age=3600');
       res.end(req.method === 'HEAD' ? undefined : content);
-    } catch (error) { if (!(error instanceof InputError)) console.error('Request failed:', error); if (!res.headersSent) json(error.status || 500, { error: error instanceof InputError ? error.message : 'Unable to save changes. Please try again.' }); else res.end(); }
+    } catch (error) {
+      const inputError = error instanceof InputError;
+      if (!inputError) console.error('Request failed:', error);
+      if (!res.headersSent) json(error.status || 500, { error: inputError ? error.message : 'Unable to save changes. Please try again.', code: inputError ? error.code : undefined });
+      else res.end();
+    }
   });
   server.on('close', () => { search.close(); auth.close(); store.close(); });
   return server;
