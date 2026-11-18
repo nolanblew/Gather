@@ -22,6 +22,8 @@ data class ListItem(
     val checked: Boolean = false,
     val sectionId: String? = null,
     val position: Int = 0,
+    val availability: Availability = Availability(),
+    val recipientId: String? = null,
 )
 
 @Serializable
@@ -46,6 +48,10 @@ data class GatherList(
     val role: String = "owner",
     val ownerUsername: String = "",
     val shared: Boolean = false,
+    val numbered: Boolean = false,
+    val places: List<Place> = emptyList(),
+    val recipients: List<Recipient> = emptyList(),
+    val orderToken: String? = null,
 ) {
     val owner
         get() = role == "owner"
@@ -61,6 +67,7 @@ data class Workspace(
     val lists: List<GatherList> = emptyList(),
     val createdListId: String? = null,
     val joinedListId: String? = null,
+    val createdItemId: String? = null,
 )
 
 @Serializable
@@ -118,18 +125,19 @@ data class SearchResponse(
 )
 
 fun payload(vararg entries: Pair<String, Any?>): JsonObject = buildJsonObject {
-    entries.forEach { (key, value) ->
-        put(
-            key,
-            when (value) {
-                null -> JsonNull
-                is Boolean -> JsonPrimitive(value)
-                is Number -> JsonPrimitive(value)
-                else -> JsonPrimitive(value.toString())
-            },
-        )
-    }
+    entries.forEach { (key, value) -> put(key, payloadValue(value)) }
 }
+
+private fun payloadValue(value: Any?): JsonElement =
+    when (value) {
+        null -> JsonNull
+        is JsonElement -> value
+        is Iterable<*> -> JsonArray(value.map(::payloadValue))
+        is Boolean -> JsonPrimitive(value)
+        is Number -> JsonPrimitive(value)
+        is String -> JsonPrimitive(value)
+        else -> error("Unsupported JSON payload value: ${value::class.simpleName}")
+    }
 
 fun visibleLists(workspace: Workspace, scope: String, categoryId: String?): List<GatherList> =
     workspace.lists

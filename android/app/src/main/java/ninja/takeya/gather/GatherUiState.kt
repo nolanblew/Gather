@@ -25,6 +25,11 @@ class AuthDraft {
 class GatherUiState {
     val auth = AuthDraft()
     private val listStates = mutableMapOf<String, LazyListState>()
+    val filters = mutableStateMapOf<String, ListFilter>()
+    val hiddenDetails = mutableStateMapOf<String, Boolean>()
+    val itemCapture = mutableStateMapOf<String, String>()
+    val hiddenSavedItems = mutableStateMapOf<String, String>()
+    val itemToReveal = mutableStateMapOf<String, String>()
     var settings by mutableStateOf(false)
     private var activeEditor by mutableStateOf<Editor?>(null)
     var editor: Editor?
@@ -62,6 +67,11 @@ class GatherUiState {
         editor = null
         settings = false
         listStates.clear()
+        filters.clear()
+        hiddenDetails.clear()
+        itemCapture.clear()
+        hiddenSavedItems.clear()
+        itemToReveal.clear()
         settingsScroll = LazyGridState()
         editorDraft.clear()
         captureId = null

@@ -10,7 +10,15 @@ export interface AuthSession {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number) { super(message); this.name = 'ApiError'; }
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+  }
 }
 
 async function readResponse(response: Response): Promise<unknown> {
@@ -27,9 +35,9 @@ function notifyAuthExpired(path: string, response: Response) {
 
 async function request<T>(path: string, body?: unknown, fallback = 'Unable to save changes. Please try again.', signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, { cache: 'no-store', credentials: 'same-origin', signal, ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
-  const data = await readResponse(response) as { error?: string } | null;
+  const data = await readResponse(response) as { error?: string; code?: string } | null;
   notifyAuthExpired(path, response);
-  if (!response.ok) throw new ApiError(data?.error || fallback, response.status);
+  if (!response.ok) throw new ApiError(data?.error || fallback, response.status, data?.code);
   if (!data || typeof data !== 'object') throw new ApiError('The server returned an invalid response. Please try again.', 502);
   return data as T;
 }
@@ -88,7 +96,7 @@ export async function getSearchStatus(): Promise<SearchStatus> {
 export function validateBackup(value: unknown): asserts value is Workspace {
   const document = value as Workspace;
   const fail = () => { throw new Error('This is not a valid Gather backup. The workspace has not changed.'); };
-  if (!document || ![1, 2].includes(document.version) || !Array.isArray(document.categories) || !Array.isArray(document.lists) || document.categories.length > 100 || document.lists.length > 1000) fail();
+  if (!document || ![1, 2, 3].includes(document.version) || !Array.isArray(document.categories) || !Array.isArray(document.lists) || document.categories.length > 100 || document.lists.length > 1000) fail();
   const ids = new Set<string>();
   const colors = ['sage', 'peach', 'lavender', 'sky', 'sand', 'rose'];
   const text = (s: unknown, max: number, required = false) => typeof s === 'string' && s.length <= max && (!required || !!s.trim());
@@ -99,12 +107,38 @@ export function validateBackup(value: unknown): asserts value is Workspace {
   let count = 0;
   for (const l of document.lists) {
     if (!l) fail(); id(l.id);
-    if (document.version === 2 && (!['checklist', 'notes'].includes(l.kind) || !['manual', 'daily', 'weekly'].includes(l.repeatCadence))) fail();
+    if (document.version >= 2 && (!['checklist', 'notes'].includes(l.kind) || !['manual', 'daily', 'weekly'].includes(l.repeatCadence))) fail();
     if (!text(l.title, 200, true) || !text(l.description, 4000) || !text(l.icon, 40, true) || !colors.includes(l.color) || !position(l.position) || (l.categoryId !== null && !categoryIds.has(l.categoryId)) || ['favorite', 'archived', 'isTemplate', 'isSample'].some(k => typeof l[k as keyof GatherListLike] !== 'boolean')) fail();
     if (![l.createdAt, l.updatedAt].every(s => text(s, 40, true) && Number.isFinite(Date.parse(s))) || !Array.isArray(l.sections) || !Array.isArray(l.items) || l.sections.length > 100 || l.items.length > 5000 || (count += l.items.length) > 20000) fail();
     const sections = new Set<string>();
     for (const s of l.sections) { if (!s) fail(); id(s.id); sections.add(s.id); if (!text(s.title, 200, true) || !position(s.position)) fail(); }
-    for (const i of l.items) { if (!i) fail(); id(i.id); if (!text(i.text, 500, true) || !text(i.quantity, 100) || !text(i.note, 4000) || typeof i.checked !== 'boolean' || !position(i.position) || (i.sectionId !== null && !sections.has(i.sectionId))) fail(); }
+    const placeIds = new Set<string>();
+    const recipientIds = new Set<string>();
+    if (document.version === 3) {
+      if ((l.numbered !== undefined && typeof l.numbered !== 'boolean') || (l.places !== undefined && (!Array.isArray(l.places) || l.places.length > 100)) || (l.recipients !== undefined && (!Array.isArray(l.recipients) || l.recipients.length > 200))) fail();
+      const label = (value: unknown, required: boolean) => typeof value === 'string' && text(value.trim().replace(/\s+/gu, ' '), 100, required);
+      for (const place of l.places || []) {
+        if (!place || !label(place.name, true) || !['city', 'store', 'home', 'work', 'online', 'other'].includes(place.kind === undefined ? 'other' : place.kind) || !label(place.region === undefined ? '' : place.region, false) || !text(place.countryCode === undefined ? '' : place.countryCode, 2) || !/^(?:[A-Z]{2})?$/.test(place.countryCode || '')) fail();
+        id(place.id);
+        placeIds.add(place.id);
+      }
+      for (const recipient of l.recipients || []) {
+        if (!recipient || !label(recipient.name, true)) fail();
+        id(recipient.id);
+        recipientIds.add(recipient.id);
+      }
+    }
+    for (const i of l.items) {
+      if (!i) fail();
+      id(i.id);
+      if (!text(i.text, 500, true) || !text(i.quantity, 100) || !text(i.note, 4000) || typeof i.checked !== 'boolean' || !position(i.position) || (i.sectionId !== null && !sections.has(i.sectionId))) fail();
+      if (document.version !== 3) continue;
+      if (i.recipientId != null && !recipientIds.has(i.recipientId)) fail();
+      if (i.availability !== undefined) {
+        const value = i.availability;
+        if (!value || !['unassigned', 'anywhere', 'selected'].includes(value.mode) || !Array.isArray(value.placeIds) || value.placeIds.length > 25 || new Set(value.placeIds).size !== value.placeIds.length || value.placeIds.some(id => !placeIds.has(id)) || (value.mode === 'selected') !== Boolean(value.placeIds.length)) fail();
+      }
+    }
   }
 }
 type GatherListLike = Workspace['lists'][number];

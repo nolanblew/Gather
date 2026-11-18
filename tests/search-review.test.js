@@ -33,6 +33,25 @@ test('hosted in-flight same-timestamp replacement drops stale evidence', async t
   assert.ok(response.results.every(r => r.listId !== 'direct'), 'Replacement must invalidate the old source');
 });
 
+test('hosted search candidate text excludes list organization labels', async t => {
+  let input;
+  const f = await fixture(t, {
+    env: { SEARCH_PROVIDER: 'openai', OPENAI_API_KEY: 'fake' },
+    fetchImpl: async (_url, request) => { input = JSON.parse(request.body); return output(['direct']); },
+  });
+  const list = f.get().lists[0];
+  list.numbered = true;
+  list.places = [{ id: 'private-place', name: 'Secret place label', kind: 'store', region: 'Secret region', countryCode: 'US' }];
+  list.recipients = [{ id: 'private-person', name: 'Secret person label' }];
+  list.items = [{ id: 'item', text: 'Grocery apples', note: 'Buy two bags', quantity: '', sectionId: null,
+    availability: { mode: 'selected', placeIds: ['private-place'] }, recipientId: 'private-person' }];
+  await f.service.search({ query: 'Grocery apples' });
+  const candidate = JSON.parse(input.input.find(entry => entry.role === 'user').content).candidates.find(entry => entry.id === list.id);
+  assert.match(candidate.text, /Grocery apples/);
+  assert.match(candidate.text, /Buy two bags/);
+  assert.doesNotMatch(candidate.text, /Secret|private-place|private-person/);
+});
+
 test('local indexing bounds each request and its retained vector cache', async t => {
   const batches = [];
   const vector = () => [1, ...Array(383).fill(0)];

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { WORKSPACE_VERSION } from './organization.mjs';
 
 export function seedWorkspace() {
   const now = new Date().toISOString();
@@ -21,5 +22,5 @@ export function seedWorkspace() {
     }
     return { id: randomUUID(), title, description, icon, color, categoryId: categories[category].id, favorite: position === 0 || position === 4, archived: false, isTemplate, isSample: true, kind: [1,2,3].includes(position) ? 'notes' : 'checklist', repeatCadence: 'manual', createdAt: now, updatedAt: now, position, sections, items };
   });
-  return { version: 2, categories, lists };
+  return { version: WORKSPACE_VERSION, categories, lists };
 }

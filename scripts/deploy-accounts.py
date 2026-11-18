@@ -1,7 +1,9 @@
 """Deploy a verified accounts release on the LAN host, preserving a rollback volume.
 
-Invoke with release directory, image tag, and a NEW volume name. Only Gather is
-stopped/recreated. The original volume is never modified by the new release.
+Invoke with release directory, image tag, and a NEW volume name. The optional
+organization-v3 mode permits only the workspace version migration. Only Gather
+is stopped/recreated. The original volume is never mounted writable by the new
+release.
 """
 import json
 import hashlib
@@ -39,11 +41,41 @@ def data_fingerprint(volume, runtime_image):
     return json.loads(run('docker', 'run', '--rm', '--network', 'none', '--user', 'root',
         '--mount', f'type=volume,source={volume},target=/app/data,readonly',
         '--mount', f'type=bind,source={release},target=/verification,readonly',
-        runtime_image, 'node', '/verification/inspect-release-data.mjs'))
+        runtime_image, 'node', '/verification/inspect-release-data.mjs', '/app/data', mode))
+
+
+def validate_migration(before, after):
+    if mode == 'organization-v3':
+        for snapshot, version, migrated in [(before, '2', False), (after, '3', True)]:
+            versions = snapshot.get('workspaceVersions', {})
+            if versions != {version: snapshot['gather.sqlite']['tables']['user_workspaces']['count']}:
+                raise RuntimeError(f'Unexpected workspace versions before deployment validation ({version} expected)')
+            if snapshot.get('organizationMigration') != migrated:
+                raise RuntimeError('Unexpected organization migration record')
+        before, after = ({k: v for k, v in snapshot.items() if k not in {'organizationMigration', 'workspaceVersions'}}
+                         for snapshot in (before, after))
+    for database in ('account.sqlite', 'gather.sqlite'):
+        if any(snapshot.get(database, {}).get('integrity') != 'ok' for snapshot in (before, after)):
+            raise RuntimeError(f'Integrity check failed for {database}')
+    if before != after:
+        raise RuntimeError('Account or workspace data changed during migration')
+
+
+def verify_capabilities(capabilities):
+    if capabilities.get('apiVersion') != 1 or 'bearer' not in capabilities.get('authentication', []):
+        raise RuntimeError('Native API capabilities are missing')
+    if mode == 'organization-v3' and (
+        capabilities.get('workspaceVersion') != 3 or
+        not {'list-organization', 'numbered-lists', 'guarded-order'} <= set(capabilities.get('features', []))
+    ):
+        raise RuntimeError('Organization capabilities are missing')
 
 
 release = Path(sys.argv[1]).resolve()
 image, new_volume = sys.argv[2:4]
+mode = sys.argv[4] if len(sys.argv) == 5 else 'accounts'
+if mode not in {'accounts', 'organization-v3'} or len(sys.argv) > 5:
+    raise SystemExit('Unexpected validation mode')
 if release.parent != Path('/home/nolan/dockers/gather/releases'):
     raise SystemExit('Unexpected release directory')
 if not re.fullmatch(r'gather_lan_accounts_[0-9a-z_]+', new_volume):
@@ -63,12 +95,15 @@ mounts = [m for m in active['Mounts'] if m['Destination'] == '/app/data' and m['
 if len(mounts) != 1 or not mounts[0]['Name'].startswith('gather_lan_'):
     raise SystemExit('Unexpected Gather data mount')
 old_volume = mounts[0]['Name']
+old_image = active['Image']
 settings = {}
 for line in (previous / '.env').read_text().splitlines():
     if '=' in line and not line.lstrip().startswith('#'):
         key, value = line.split('=', 1)
         settings[key] = value
-settings.update(GATHER_IMAGE=image, GATHER_DATA_VOLUME=new_volume, GATHER_COOKIE_SECURE='true')
+settings.update(GATHER_IMAGE=image, GATHER_DATA_VOLUME=new_volume)
+if mode == 'accounts':
+    settings['GATHER_COOKIE_SECURE'] = 'true'
 env_path = release / '.env'
 env_path.touch(mode=0o600, exist_ok=False)
 env_path.write_text(''.join(f'{key}={value}\n' for key, value in settings.items()), encoding='utf8')
@@ -77,17 +112,18 @@ expected_image = json.loads(run('docker', 'image', 'inspect', image))[0]['Id']
 if not (release / 'inspect-release-data.mjs').is_file():
     raise SystemExit('Missing data preservation verifier')
 run('docker', 'volume', 'create', new_volume)
-backup = release / 'data-before-accounts.tar'
+backup = release / ('data-before-organization.tar' if mode == 'organization-v3' else 'data-before-accounts.tar')
 backup.touch(mode=0o600, exist_ok=False)
 stopped = False
+publishing = False
 try:
     run('docker', 'stop', active['Id'])
     stopped = True
-    data_before = data_fingerprint(old_volume, active['Config']['Image'])
+    data_before = data_fingerprint(old_volume, old_image)
     run('docker', 'run', '--rm', '--network', 'none', '--user', 'root',
         '--mount', f'type=volume,source={old_volume},target=/source,readonly',
         '--mount', f'type=bind,source={release},target=/backup',
-        active['Config']['Image'], 'tar', '-C', '/source', '-cf', '/backup/data-before-accounts.tar', '.')
+        old_image, 'tar', '-C', '/source', '-cf', f'/backup/{backup.name}', '.')
     os.chmod(backup, 0o600)
     with tarfile.open(backup) as archive:
         members = archive.getnames()
@@ -97,23 +133,27 @@ try:
     run('docker', 'run', '--rm', '--network', 'none', '--user', 'root',
         '--mount', f'type=volume,source={new_volume},target=/target',
         '--mount', f'type=bind,source={release},target=/backup,readonly',
-        active['Config']['Image'], 'tar', '-C', '/target', '-xf', '/backup/data-before-accounts.tar')
+        old_image, 'tar', '-C', '/target', '-xf', f'/backup/{backup.name}')
     # Migrate and compare the cloned databases before publishing the new server.
     # This also avoids confusing legitimate post-start user edits with data loss.
-    run('docker', 'run', '--rm', '--network', 'none',
+    isolated = run('docker', 'run', '--rm', '--network', 'none',
         '--mount', f'type=volume,source={new_volume},target=/app/data',
         '-e', 'GATHER_COOKIE_SECURE=true', '-e', 'SEARCH_PROVIDER=fuzzy', image,
         'node', '--input-type=module', '-e',
-        "import { createApp } from './server/index.js'; const app=createApp(); await new Promise(resolve=>app.close(resolve));")
+        "import { startServer } from './server/index.js'; const server=await startServer({port:0,host:'127.0.0.1'}); "
+        "try { const base='http://127.0.0.1:'+server.address().port; "
+        "const health=await fetch(base+'/api/health'); if(!health.ok) throw Error('Health check failed'); "
+        "console.log(JSON.stringify(await (await fetch(base+'/api/capabilities')).json())); } "
+        "finally { await new Promise(resolve=>server.close(resolve)); }")
+    verify_capabilities(json.loads(isolated))
     data_after = data_fingerprint(new_volume, image)
-    if data_before != data_after:
-        raise RuntimeError('Account or workspace data changed during migration')
+    validate_migration(data_before, data_after)
+    publishing = True
     run('docker', 'compose', '-f', 'compose.lan.yaml', 'up', '-d', '--pull', 'never', '--no-deps', 'gather', cwd=release)
     healthcheck()
     with urllib.request.urlopen('http://192.168.68.68:48732/api/capabilities', timeout=3) as response:
         capabilities = json.load(response)
-        if capabilities.get('apiVersion') != 1 or 'bearer' not in capabilities.get('authentication', []):
-            raise RuntimeError('Native API capabilities are missing')
+        verify_capabilities(capabilities)
     with urllib.request.urlopen('http://192.168.68.68:48732/api/auth/session', timeout=3) as response:
         session = json.load(response)
         if session.get('authenticated') or session.get('setupRequired'):
@@ -129,7 +169,8 @@ try:
     temporary = current.with_name('current.accounts-next')
     if temporary.exists() or temporary.is_symlink():
         raise RuntimeError('Unexpected pending release symlink')
-    report = {'image': image, 'imageId': expected_image, 'volume': new_volume, 'previousRelease': str(previous),
+    report = {'image': image, 'imageId': expected_image, 'baseRuntimeImageId': old_image, 'validationMode': mode,
+              'volume': new_volume, 'previousRelease': str(previous),
               'rollbackVolume': old_volume, 'backup': str(backup), 'backupSha256': backup_sha256,
               'containersChecked': len(before), 'unrelatedContainersUnchanged': True,
               'accountAndWorkspaceDataPreserved': True, 'dataFingerprint': data_after, 'capabilities': capabilities}
@@ -138,6 +179,16 @@ try:
     temporary.replace(current)
 except Exception:
     if stopped:
+        if publishing and mode == 'organization-v3':
+            candidate = next((c for c in inventory() if c['Image'] == expected_image and
+                              (c['Config'].get('Labels') or {}).get('com.docker.compose.project') == 'gather-lan'), None)
+            if candidate and candidate['State']['Running']:
+                run('docker', 'stop', candidate['Id'])
+            if data_fingerprint(new_volume, image) != data_after:
+                # The new server may already have accepted a write. Keep it on
+                # the migrated copy so an automatic rollback cannot lose data.
+                run('docker', 'compose', '-f', 'compose.lan.yaml', 'up', '-d', '--pull', 'never', '--no-deps', 'gather', cwd=release)
+                raise RuntimeError('Candidate volume changed after publication; automatic rollback withheld to preserve new writes')
         subprocess.run(['docker', 'compose', '-f', 'compose.lan.yaml', 'up', '-d', '--pull', 'never', '--no-deps', 'gather'], cwd=previous, check=True)
         healthcheck()
     raise

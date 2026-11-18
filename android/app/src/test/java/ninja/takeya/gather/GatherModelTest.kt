@@ -190,5 +190,67 @@ class GatherModelTest {
             )
         assertEquals("a", workspace.createdListId)
         assertEquals("checklist", workspace.lists.single().kind)
+        assertFalse(workspace.lists.single().numbered)
+        assertEquals(emptyList<Place>(), workspace.lists.single().places)
+    }
+
+    @Test
+    fun numberedViewKeepsCanonicalOrderAndFiltersAlternativePlaces() {
+        val list = GatherList(
+            "trip", "Trip", numbered = true,
+            places = listOf(Place("kyoto", "Kyoto"), Place("tokyo", "Tokyo")),
+            recipients = listOf(Recipient("maya", "Maya")),
+            sections = listOf(Section("last", "Last", 2), Section("empty", "Empty", 1)),
+            items = listOf(
+                ListItem("tea", "Tea", availability = Availability("selected", listOf("kyoto", "tokyo")), recipientId = "maya"),
+                ListItem("socks", "Socks", checked = true, position = 1, availability = Availability("anywhere"), recipientId = "maya"),
+                ListItem("paper", "Paper", position = 2),
+                ListItem("gift", "Gift", sectionId = "last", availability = Availability("anywhere"), recipientId = "maya"),
+            ),
+        )
+        val canonical = list.canonicalItems()
+        val filter = ListFilter(place = "kyoto", person = "maya", notDone = true)
+        assertEquals(listOf("tea", "socks", "paper", "gift"), canonical.map { it.id })
+        assertEquals(listOf(1, 4), canonical.mapIndexedNotNull { index, item -> (index + 1).takeIf { filter.matches(item) } })
+        assertEquals("Also Tokyo", list.itemMetadata(canonical.first(), filter))
+        assertEquals("Kyoto · Maya · Not done · 2 shown", filter.summary(list))
+        assertEquals(listOf("paper"), canonical.filter(ListFilter(place = FILTER_UNSET)::matches).map { it.id })
+    }
+
+    @Test
+    fun itemDraftSerializesNestedAtomicFieldsAndOnlySendsTouchedMetadata() {
+        val original = ListItem("item", "Tea", note = "Keep\n\nThis", availability = Availability("anywhere"), recipientId = "old")
+        val list = GatherList("list", "List", numbered = true, orderToken = "token", items = listOf(original))
+        val scalar = list.itemWritePayload(
+            original, "New tea", original.note, "", null, original.availability, "old", emptyList(), null,
+            original.availability, "old",
+        )
+        assertEquals(setOf("listId", "itemId", "text"), scalar.keys)
+        val structural = list.itemWritePayload(
+            original, original.text, original.note, "2", "section", Availability("selected", listOf("pl")),
+            null, listOf("Kyoto", "Tokyo"), "Maya", original.availability, "old",
+        )
+        assertEquals(JsonPrimitive("token"), structural["expectedOrderToken"])
+        assertEquals(JsonPrimitive("old"), structural["expectedRecipientId"])
+        assertEquals(JsonPrimitive("Maya"), structural["newRecipient"]?.jsonObject?.get("name"))
+        assertEquals(JsonArray(listOf(JsonPrimitive("pl"))), structural["availability"]?.jsonObject?.get("placeIds"))
+        assertEquals(listOf("Kyoto", "Tokyo"), structural["newPlaces"]?.jsonArray?.map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        assertEquals(JsonPrimitive("anywhere"), structural["expectedAvailability"]?.jsonObject?.get("mode"))
+        assertFalse(structural.containsKey("note"))
+    }
+
+    @Test
+    fun nativeReadsSparseVersionThreeOrganizationState() {
+        val json = Json { ignoreUnknownKeys = true }
+        val workspace = json.decodeFromString<Workspace>(
+            """{"version":3,"lists":[{"id":"trip","title":"Trip","numbered":true,"orderToken":"guard","places":[{"id":"p","name":"Kyoto"}],"recipients":[{"id":"r","name":"Maya"}],"items":[{"id":"i","text":"Tea","note":"Paragraph 1\n\nParagraph 2","availability":{"mode":"selected","placeIds":["p"]},"recipientId":"r"},{"id":"j","text":"Paper"}]}],"createdItemId":"i"}"""
+        )
+        val list = workspace.lists.single()
+        assertEquals("i", workspace.createdItemId)
+        assertEquals("other", list.places.single().kind)
+        assertEquals("guard", list.orderToken)
+        assertEquals("Paragraph 1\n\nParagraph 2", list.items.first().note)
+        assertEquals(Availability(), list.items.last().availability)
+        assertNull(list.items.last().recipientId)
     }
 }
