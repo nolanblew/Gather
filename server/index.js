@@ -46,7 +46,7 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
           if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) throw new InputError('Use application/json.', 415);
         }
         if (req.method === 'GET' && url.pathname === '/api/health') { store.health(); return json(200, { status: 'ok' }); }
-        if (req.method === 'GET' && url.pathname === '/api/capabilities') return json(200, { apiVersion: 1, workspaceVersion: WORKSPACE_VERSION, authentication: ['cookie', 'bearer'], features: ['sharing', 'search', 'import', 'export', 'list-organization', 'numbered-lists', 'guarded-order'] });
+        if (req.method === 'GET' && url.pathname === '/api/capabilities') return json(200, { apiVersion: 1, workspaceVersion: WORKSPACE_VERSION, authentication: ['cookie', 'bearer'], features: ['sharing', 'search', 'import', 'export', 'list-organization', 'numbered-lists', 'guarded-order', 'multiple-recipients', 'bulk-assignments', 'visible-item-order'] });
         if (url.pathname.startsWith('/api/native/auth/')) {
           const method=url.pathname.slice('/api/native/auth/'.length);
           if (method==='session' && req.method==='GET') return json(200,auth.session(req,'bearer'));

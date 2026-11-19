@@ -6,9 +6,11 @@ Gather is a responsive home for everyday lists, gift ideas, projects, and reusab
 
 ## Optional organization
 
-Start with an ordinary list and add details only when useful. **Add detail** offers descriptions, alternative places, a person an item is for, quantity and sections. Places and people belong to that list. **Filter this list** shows relevant choices; **Number items** adds shared numbering for priorities and sequences. Descriptions support multiple paragraphs.
+Use **Add detail** to add a description, quantity, section, alternative places, or the people an item is for. **Select items** lets you add people or places to several items together. Places and people belong to the list.
 
-See the [product requirements](docs/TRIP-ORGANIZATION-PRD.md), [technical design](docs/TRIP-ORGANIZATION-TDR.md), and [implementation checks](docs/ORGANIZATION-IMPLEMENTATION-VERIFICATION.md). This feature uses workspace version 3; update the server before clients. Automatic location suggestions remain future work.
+Ordinary lists open in date-added order. Use **View** to filter items, group them by place or person, or change the sort. A shared item appears in each applicable group. Checking it off updates every appearance. Manual reordering moves it within its section, including when viewing a filtered group. **Number items** displays the shared sequence.
+
+These features use workspace version 4. Update the server before clients. Existing lists and earlier backups retain their assignments. [Shared API](docs/API.md)
 
 ## Native Android app
 

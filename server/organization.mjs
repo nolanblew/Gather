@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { InputError, bool, fail, id, object, string } from './input.mjs';
 
-export const WORKSPACE_VERSION = 3;
+export const WORKSPACE_VERSION = 4;
 const MAX_SELECTED_PLACES = 25;
 const PLACE_KINDS = new Set(['city', 'store', 'home', 'work', 'online', 'other']);
 const UNASSIGNED = Object.freeze({ mode: 'unassigned', placeIds: Object.freeze([]) });
@@ -47,9 +47,30 @@ function setAvailability(item, value) {
   else item.availability = value;
 }
 
-function setRecipient(item, value) {
-  if (value === null) delete item.recipientId;
-  else item.recipientId = value;
+function peopleOn(item) {
+  return item.recipientIds ?? (item.recipientId ? [item.recipientId] : []);
+}
+
+function setPeople(item, ids) {
+  delete item.recipientId;
+  delete item.recipientIds;
+  if (ids.length === 1) item.recipientId = ids[0];
+  if (ids.length > 1) item.recipientIds = ids.toSorted();
+}
+
+function checkedIds(values, limit, name) {
+  if (!Array.isArray(values) || values.length > limit) fail(`Choose up to ${limit} ${name}.`);
+  const ids = values.map(id);
+  if (new Set(ids).size !== ids.length) fail(`Choose distinct ${name}.`);
+  return ids.sort();
+}
+
+function recipientIds(input) {
+  if (Object.hasOwn(input, 'recipientIds')) {
+    if (Object.hasOwn(input, 'recipientId')) fail('Choose one format for people.');
+    return checkedIds(input.recipientIds, labels.recipient.limit, 'people');
+  }
+  return input.recipientId == null ? [] : [id(input.recipientId)];
 }
 
 function requireReference(ids, value, name) {
@@ -78,10 +99,9 @@ export function readItemOrganization(source, item, ids) {
     for (const placeId of value.placeIds) requireReference(ids.places, placeId, 'Place');
     setAvailability(item, value);
   }
-  if (Object.hasOwn(source, 'recipientId') && source.recipientId !== null) {
-    requireReference(ids.recipients, id(source.recipientId), 'Person');
-    setRecipient(item, source.recipientId);
-  }
+  const people = recipientIds(source);
+  for (const person of people) requireReference(ids.recipients, person, 'Person');
+  setPeople(item, people);
 }
 
 export function orderToken(list) {
@@ -92,9 +112,9 @@ export function orderToken(list) {
   return sha256([list.id, Boolean(list.numbered), sections, items]);
 }
 
-export function guardOrder(list, payload, toggling = false) {
+export function guardOrder(list, payload, required = false) {
   if (!Object.hasOwn(payload, 'expectedOrderToken')) {
-    if (toggling || list.numbered) throw new InputError('Refresh the list or update the app before editing the order.', 409, 'ORDER_TOKEN_REQUIRED');
+    if (required || list.numbered) throw new InputError('Refresh the list or update the app before editing the order.', 409, 'ORDER_TOKEN_REQUIRED');
     return;
   }
   if (payload.expectedOrderToken !== orderToken(list)) {
@@ -110,7 +130,7 @@ export function assignmentToken(list, type, entry) {
   const pairs = [];
   for (const item of list.items) {
     if (type === 'place' && item.availability?.placeIds.includes(entry.id)) pairs.push([item.id, availability(item.availability)]);
-    if (type === 'recipient' && item.recipientId === entry.id) pairs.push([item.id, item.recipientId]);
+    if (type === 'recipient' && peopleOn(item).includes(entry.id)) pairs.push([item.id, entry.id]);
   }
   return sha256([type, entry.id, definition(type, entry, entry.id), pairs.sort(byId)]);
 }
@@ -137,11 +157,26 @@ function createDefinition(list, type, input, inline = false) {
   return value.id;
 }
 
+function resolveAdditions(list, type, existing, drafts, limit) {
+  const { field, display } = labels[type];
+  const available = new Set((list[field] ?? []).map(value => value.id));
+  for (const value of existing) requireReference(available, value, display);
+  if (!Array.isArray(drafts) || drafts.length > limit) fail(`Too many new ${field}.`);
+  return [...new Set([...existing, ...drafts.map(value => createDefinition(list, type, value, true))])];
+}
+
+function peopleDrafts(payload) {
+  if (!Object.hasOwn(payload, 'newRecipient')) return Object.hasOwn(payload, 'newRecipients') ? payload.newRecipients : [];
+  if (Object.hasOwn(payload, 'newRecipients') || payload.recipientId != null || Object.hasOwn(payload, 'recipientIds')) {
+    fail('Choose one format for new people.');
+  }
+  return [payload.newRecipient];
+}
+
 export function editAssignments(list, item, payload, update = false) {
   const draftsPlaces = Object.hasOwn(payload, 'newPlaces');
-  const draftsRecipient = Object.hasOwn(payload, 'newRecipient');
   const editsPlace = Object.hasOwn(payload, 'availability') || draftsPlaces;
-  const editsRecipient = Object.hasOwn(payload, 'recipientId') || draftsRecipient;
+  const editsRecipient = ['recipientIds', 'recipientId', 'newRecipients', 'newRecipient'].some(key => Object.hasOwn(payload, key));
   if (update && editsPlace) {
     if (!Object.hasOwn(payload, 'expectedAvailability')) assignmentConflict();
     const expected = availability(payload.expectedAvailability);
@@ -149,29 +184,41 @@ export function editAssignments(list, item, payload, update = false) {
     if (expected.mode !== current.mode || expected.placeIds.length !== current.placeIds.length ||
         expected.placeIds.some((placeId, index) => placeId !== current.placeIds[index])) assignmentConflict();
   }
-  if (update && editsRecipient && payload.expectedRecipientId !== (item.recipientId ?? null)) assignmentConflict();
+  if (update && editsRecipient) {
+    const current = peopleOn(item);
+    if (Object.hasOwn(payload, 'expectedRecipientIds')) {
+      const expected = checkedIds(payload.expectedRecipientIds, labels.recipient.limit, 'people');
+      if (current.length !== expected.length || current.some((value, i) => value !== expected[i])) assignmentConflict();
+    } else if (current.length > 1 || payload.expectedRecipientId !== (current[0] ?? null)) assignmentConflict();
+  }
 
   if (editsPlace) {
     const value = availability(payload.availability, draftsPlaces);
-    const placeIds = new Set((list.places ?? []).map(place => place.id));
-    for (const placeId of value.placeIds) requireReference(placeIds, placeId, 'Place');
-    if (draftsPlaces) {
-      if (value.mode !== 'selected') fail('Choose places, Anywhere, or No places set.');
-      if (!Array.isArray(payload.newPlaces) || payload.newPlaces.length > MAX_SELECTED_PLACES) fail('Choose up to 25 places.');
-      const added = payload.newPlaces.map(place => createDefinition(list, 'place', place, true));
-      value.placeIds = [...new Set([...value.placeIds, ...added])];
-    }
+    if (draftsPlaces && value.mode !== 'selected') fail('Choose places, Anywhere, or No places set.');
+    value.placeIds = resolveAdditions(list, 'place', value.placeIds, draftsPlaces ? payload.newPlaces : [], MAX_SELECTED_PLACES);
     setAvailability(item, availability(value));
   }
   if (editsRecipient) {
-    let recipientId = Object.hasOwn(payload, 'recipientId') ? payload.recipientId : null;
-    if (draftsRecipient) {
-      if (recipientId !== null) fail('Choose an existing person or create a name.');
-      recipientId = createDefinition(list, 'recipient', payload.newRecipient, true);
-    } else if (recipientId !== null) {
-      requireReference(new Set((list.recipients ?? []).map(entry => entry.id)), id(recipientId), 'Person');
+    setPeople(item, resolveAdditions(list, 'recipient', recipientIds(payload), peopleDrafts(payload), labels.recipient.limit));
+  }
+}
+
+export function bulkAdd(list, payload, items) {
+  const people = resolveAdditions(list, 'recipient', recipientIds(payload), peopleDrafts(payload), labels.recipient.limit);
+  const places = resolveAdditions(list, 'place',
+    checkedIds(Object.hasOwn(payload, 'placeIds') ? payload.placeIds : [], MAX_SELECTED_PLACES, 'places'),
+    Object.hasOwn(payload, 'newPlaces') ? payload.newPlaces : [], MAX_SELECTED_PLACES);
+  if (!people.length && !places.length) fail('Choose a place or person to add.');
+  if (places.length && Object.hasOwn(payload, 'expectedAnywhereItemIds')) {
+    const acknowledged = new Set(checkedIds(payload.expectedAnywhereItemIds, items.length, 'items'));
+    if (items.some(item => item.availability?.mode === 'anywhere' && !acknowledged.has(item.id))) assignmentConflict();
+  }
+  for (const item of items) {
+    if (people.length) setPeople(item, [...new Set([...peopleOn(item), ...people])]);
+    if (places.length) {
+      const placeIds = [...new Set([...(item.availability?.placeIds ?? []), ...places])];
+      setAvailability(item, availability({ mode: 'selected', placeIds }));
     }
-    setRecipient(item, recipientId);
   }
 }
 
@@ -191,7 +238,7 @@ export function editDictionary(list, type, command, payload) {
         const placeIds = item.availability.placeIds.filter(placeId => placeId !== entryId);
         setAvailability(item, placeIds.length ? { mode: 'selected', placeIds } : UNASSIGNED);
       }
-      if (type === 'recipient' && item.recipientId === entryId) setRecipient(item, null);
+      if (type === 'recipient' && peopleOn(item).includes(entryId)) setPeople(item, peopleOn(item).filter(value => value !== entryId));
     }
   } else if (command === 'update') {
     if (!entry) fail(`${display} not found.`);
@@ -210,7 +257,7 @@ export function remapListContent(list, mapping, resetCompletion = false) {
   for (const item of result.items) {
     if (resetCompletion) item.checked = false;
     if (item.sectionId !== null) item.sectionId = mapping.get(item.sectionId);
-    if (item.recipientId) item.recipientId = mapping.get(item.recipientId);
+    setPeople(item, peopleOn(item).map(id => mapping.get(id)));
     if (item.availability) {
       item.availability = { mode: item.availability.mode, placeIds: item.availability.placeIds.map(placeId => mapping.get(placeId)).sort() };
     }

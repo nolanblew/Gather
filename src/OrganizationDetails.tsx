@@ -1,6 +1,7 @@
 import { useId, useState } from 'react';
 import { ArrowLeft, ChevronDown, FileText, Hash, Layers, MapPin, UserRound } from 'lucide-react';
 import Dialog from './Dialog';
+import type { ItemGrouping, ItemSort } from './itemOrder';
 import { dictionaryDeletion, filterOptions, matchesListFilters, namedPersonId, namedPlaceId, normalizeName, personFilter, placeFilter, placeLabel } from './organization';
 import type { ListFilters } from './organization';
 import type { GatherList, Mutation, Place, PlaceFields, Recipient } from './types';
@@ -39,8 +40,19 @@ export function RadioChoices<T extends string>({ label, value, options, choose }
   </fieldset>;
 }
 
-export function FiltersDialog({ list, filters, query, apply, close }: { list: GatherList; filters: ListFilters; query: string; apply: (filters: ListFilters) => void; close: () => void }) {
+export function ViewDialog({ list, filters, query, sort, groupBy, apply, close }: {
+  list: GatherList;
+  filters: ListFilters;
+  query: string;
+  sort: ItemSort;
+  groupBy: ItemGrouping;
+  apply: (filters: ListFilters, sort: ItemSort, groupBy: ItemGrouping) => void;
+  close: () => void;
+}) {
   const [draft, setDraft] = useState(filters);
+  const [draftSort, setDraftSort] = useState(sort);
+  const [draftGroup, setDraftGroup] = useState(groupBy);
+  const groupName = useId();
   const [originalOptions] = useState(() => filterOptions(list));
   const currentOptions = filterOptions(list);
   const places = (list.places || []).filter(place => originalOptions.places.has(place.id) || currentOptions.places.has(place.id) || place.id === namedPlaceId(draft.place) || place.id === namedPlaceId(filters.place));
@@ -51,24 +63,45 @@ export function FiltersDialog({ list, filters, query, apply, close }: { list: Ga
     ...draft,
     place: draftPlace && !places.some(place => place.id === draftPlace) ? 'all' as const : draft.place,
     person: draftPerson && !people.some(person => person.id === draftPerson) ? 'all' as const : draft.person,
-    notDone: list.kind === 'checklist' && draft.notDone,
+    notDone: list.kind === 'checklist' && !list.isTemplate && draft.notDone,
   };
   const showCompletion = list.kind === 'checklist' && !list.isTemplate && (originalOptions.hasChecked || currentOptions.hasChecked || draft.notDone || filters.notDone);
   const showPlaces = places.length > 0 || originalOptions.anywhere > 0 || currentOptions.anywhere > 0 || filters.place !== 'all' || draft.place !== 'all';
   const showPeople = people.length > 0 || originalOptions.people.size > 0 || filters.person !== 'all' || draft.person !== 'all';
   const resultCount = list.items.filter(item => matchesListFilters(item, currentDraft, query)).length;
-  return <Dialog title="Filters" close={close} busy={false}>
+  const groupOptions: { value: ItemGrouping; label: string }[] = [{ value: 'none', label: 'None' }];
+  if (showPlaces || groupBy === 'place') groupOptions.push({ value: 'place', label: 'Place' });
+  if (showPeople || groupBy === 'person') groupOptions.push({ value: 'person', label: 'Person' });
+  return <Dialog title="View" close={close} busy={false} className="list-view-dialog">
+    <label className="field">Sort by<select value={draftSort} onChange={event => setDraftSort(event.target.value as ItemSort)}>
+      <option value="added">Date added (oldest first)</option>
+      <option value="newest">Date added (newest first)</option>
+      <option value="name">Name (A–Z)</option>
+      <option value="manual">Manual order</option>
+    </select></label>
+    {groupOptions.length > 1 && <fieldset className="view-group-choices">
+      <legend>Group by</legend>
+      <div className="segmented">
+        {groupOptions.map(({ value, label }) => <label key={value}>
+          <input type="radio" name={groupName} checked={draftGroup === value} onChange={() => setDraftGroup(value)} />
+          <span>{label}</span>
+        </label>)}
+      </div>
+    </fieldset>}
+    {showPlaces && <label className="field">Places<select value={currentDraft.place} onChange={event => setDraft({ ...currentDraft, place: event.target.value as ListFilters['place'] })}>
+      <option value="all">All places</option>
+      {places.map(place => <option key={place.id} value={placeFilter(place.id)}>{placeLabel(place)}</option>)}
+      <option value="anywhere">Anywhere only</option>
+      <option value="unassigned">No places set ({currentOptions.unassigned})</option>
+    </select></label>}
+    {showPeople && <label className="field">For someone<select value={currentDraft.person} onChange={event => setDraft({ ...currentDraft, person: event.target.value as ListFilters['person'] })}>
+      <option value="all">All people</option>
+      {people.map(person => <option key={person.id} value={personFilter(person.id)}>{person.name}</option>)}
+      <option value="unassigned">No recipient</option>
+    </select></label>}
     {showCompletion && <RadioChoices label="Completion" value={currentDraft.notDone ? 'notDone' : 'all'} options={[{ value: 'all', label: 'All items' }, { value: 'notDone', label: 'Not done' }]} choose={value => setDraft({ ...currentDraft, notDone: value === 'notDone' })} />}
-    {showPlaces && <RadioChoices label="Places" value={currentDraft.place} options={[
-      { value: 'all', label: 'All places' }, ...places.map(place => ({ value: placeFilter(place.id), label: placeLabel(place) })),
-      { value: 'anywhere', label: 'Anywhere only' }, { value: 'unassigned', label: 'No places set', detail: `${currentOptions.unassigned} without a place`, detailLabel: `${currentOptions.unassigned} ${currentOptions.unassigned === 1 ? 'item' : 'items'} without a place` },
-    ]} choose={place => setDraft({ ...currentDraft, place })} />}
-    {showPeople && <RadioChoices label="For someone" value={currentDraft.person} options={[
-      { value: 'all', label: 'No filter' }, ...people.map(person => ({ value: personFilter(person.id), label: person.name })),
-      { value: 'unassigned', label: 'Not set' },
-    ]} choose={person => setDraft({ ...currentDraft, person })} />}
     <p className="small-muted" aria-live="polite">{resultCount} {resultCount === 1 ? 'item matches' : 'items match'}</p>
-    <div className="dialog-actions"><button className="secondary" onClick={close}>Cancel</button><button className="primary" onClick={() => apply(currentDraft)}>Apply</button></div>
+    <div className="dialog-actions"><button className="secondary" onClick={close}>Cancel</button><button className="primary" onClick={() => apply(currentDraft, draftSort, draftGroup)}>Apply</button></div>
   </Dialog>;
 }
 

@@ -20,6 +20,10 @@ export const normalizeName = (value: string) => value.trim().replace(/\s+/gu, ' 
 export const nameKey = (value: string) => normalizeName(value).normalize('NFC').toLowerCase();
 export const placeLabel = ({ name, region, countryCode }: PlaceFields) => [name, region, countryCode].filter(Boolean).join(', ');
 
+export function itemRecipientIds(item: Pick<Item, 'recipientId' | 'recipientIds'>): string[] {
+  return item.recipientIds ?? (item.recipientId ? [item.recipientId] : []);
+}
+
 export function sameAvailability(left: Availability, right: Availability) {
   return left.mode === right.mode && left.placeIds.length === right.placeIds.length && left.placeIds.every(id => right.placeIds.includes(id));
 }
@@ -36,7 +40,8 @@ export function filterOptions(list: GatherList) {
     availability.placeIds.forEach(id => places.add(id));
     anywhere += Number(availability.mode === 'anywhere');
     unassigned += Number(availability.mode === 'unassigned');
-    if (item.recipientId) people.add(item.recipientId);
+    const recipients = itemRecipientIds(item);
+    if (recipients.length) recipients.forEach(id => people.add(id));
     else withoutPerson++;
     hasChecked ||= item.checked;
   }
@@ -49,7 +54,8 @@ export function matchesListFilters(item: Item, filters: ListFilters, query = '')
   const placeId = namedPlaceId(filters.place);
   if (placeId ? mode !== 'anywhere' && !placeIds.includes(placeId) : filters.place !== 'all' && mode !== filters.place) return false;
   const personId = namedPersonId(filters.person);
-  if (personId ? item.recipientId !== personId : filters.person === 'unassigned' && item.recipientId) return false;
+  const recipients = itemRecipientIds(item);
+  if (personId ? !recipients.includes(personId) : filters.person === 'unassigned' && recipients.length) return false;
   return !query || [item.text, item.note, item.quantity].some(text => text.toLocaleLowerCase().includes(query));
 }
 
@@ -91,7 +97,7 @@ export function dictionaryDeletion(list: GatherList, type: 'place' | 'recipient'
     if (place && item.availability?.placeIds.includes(id)) {
       affected.push([item.id, { mode: 'selected', placeIds: item.availability.placeIds.slice().sort(lexical) }]);
     }
-    if (recipient && item.recipientId === id) affected.push([item.id, id]);
+    if (recipient && itemRecipientIds(item).includes(id)) affected.push([item.id, id]);
   }
   affected.sort(([left], [right]) => lexical(left, right));
   return { count: affected.length, token: sha256(JSON.stringify([type, id, definition, affected])) };

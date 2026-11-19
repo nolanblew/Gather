@@ -96,7 +96,7 @@ export async function getSearchStatus(): Promise<SearchStatus> {
 export function validateBackup(value: unknown): asserts value is Workspace {
   const document = value as Workspace;
   const fail = () => { throw new Error('This is not a valid Gather backup. The workspace has not changed.'); };
-  if (!document || ![1, 2, 3].includes(document.version) || !Array.isArray(document.categories) || !Array.isArray(document.lists) || document.categories.length > 100 || document.lists.length > 1000) fail();
+  if (!document || ![1, 2, 3, 4].includes(document.version) || !Array.isArray(document.categories) || !Array.isArray(document.lists) || document.categories.length > 100 || document.lists.length > 1000) fail();
   const ids = new Set<string>();
   const colors = ['sage', 'peach', 'lavender', 'sky', 'sand', 'rose'];
   const text = (s: unknown, max: number, required = false) => typeof s === 'string' && s.length <= max && (!required || !!s.trim());
@@ -114,7 +114,7 @@ export function validateBackup(value: unknown): asserts value is Workspace {
     for (const s of l.sections) { if (!s) fail(); id(s.id); sections.add(s.id); if (!text(s.title, 200, true) || !position(s.position)) fail(); }
     const placeIds = new Set<string>();
     const recipientIds = new Set<string>();
-    if (document.version === 3) {
+    if (document.version >= 3) {
       if ((l.numbered !== undefined && typeof l.numbered !== 'boolean') || (l.places !== undefined && (!Array.isArray(l.places) || l.places.length > 100)) || (l.recipients !== undefined && (!Array.isArray(l.recipients) || l.recipients.length > 200))) fail();
       const label = (value: unknown, required: boolean) => typeof value === 'string' && text(value.trim().replace(/\s+/gu, ' '), 100, required);
       for (const place of l.places || []) {
@@ -132,8 +132,11 @@ export function validateBackup(value: unknown): asserts value is Workspace {
       if (!i) fail();
       id(i.id);
       if (!text(i.text, 500, true) || !text(i.quantity, 100) || !text(i.note, 4000) || typeof i.checked !== 'boolean' || !position(i.position) || (i.sectionId !== null && !sections.has(i.sectionId))) fail();
-      if (document.version !== 3) continue;
+      if (document.version < 3) continue;
       if (i.recipientId != null && !recipientIds.has(i.recipientId)) fail();
+      if (i.recipientIds !== undefined && (Object.hasOwn(i, 'recipientId') || !Array.isArray(i.recipientIds) ||
+          i.recipientIds.length > 200 || new Set(i.recipientIds).size !== i.recipientIds.length ||
+          i.recipientIds.some(value => !recipientIds.has(value)))) fail();
       if (i.availability !== undefined) {
         const value = i.availability;
         if (!value || !['unassigned', 'anywhere', 'selected'].includes(value.mode) || !Array.isArray(value.placeIds) || value.placeIds.length > 25 || new Set(value.placeIds).size !== value.placeIds.length || value.placeIds.some(id => !placeIds.has(id)) || (value.mode === 'selected') !== Boolean(value.placeIds.length)) fail();

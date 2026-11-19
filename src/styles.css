@@ -124,3 +124,50 @@ button.assigned-value:hover { background:var(--subtle-hover); }
 .item-ordinal { margin-top:8px; line-height:1.5; }
 .item-row > .note-bullet { margin-top:5px; }
 .distinguish-place { margin-left:12px; }
+
+.list-view-actions,.list-mode-actions { display:flex; align-items:center; gap:8px; }
+.list-view-actions .secondary { white-space:nowrap; }
+.list-mode-bar { display:flex; align-items:center; justify-content:space-between; gap:8px 14px; flex-wrap:wrap; margin-bottom:10px; padding:5px 9px 5px 13px; border:1px solid var(--border); border-radius:9px; background:var(--field-surface); }
+.list-mode-actions { flex-wrap:wrap; }
+.list-mode-actions .text-button { min-height:44px; }
+.mode-title { display:flex; align-items:center; gap:6px; min-height:32px; font-size:14px; }
+.list-mode-help { color:var(--muted); margin-bottom:19px; font-size:14px; }
+.item-subgroup + .item-subgroup { margin-top:18px; }
+.item-subgroup > :is(h2,h3) { font:21px/1.25 Georgia,serif; padding:8px 7px; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
+.item-alias { display:flex; align-items:baseline; gap:6px; }
+.item-alias svg { color:var(--green); flex-shrink:0; align-self:center; }
+.item-selection { cursor:pointer; }
+.item-selection .checkbox-visual { border-radius:3px; }
+.item-selection.item-selected { background:var(--selected-wash); }
+.item-grip { min-width:44px; min-height:44px; display:grid; place-items:center; color:var(--muted); flex-shrink:0; cursor:grab; touch-action:none; user-select:none; }
+.item-grip:active { cursor:grabbing; }
+.item-grip-inactive { touch-action:auto; cursor:default; }
+[data-reorder-item] { position:relative; }
+[data-reorder-item] .context-menu { flex-shrink:0; }
+[data-reorder-item] .menu-panel button { display:flex; align-items:center; gap:8px; }
+[data-reorder-item] .item-content { min-width:0; overflow-wrap:anywhere; }
+.item-lifted { z-index:2; background:var(--surface); outline:1px solid var(--border); border-radius:7px; box-shadow:0 3px 10px var(--menu-shadow); }
+.drop-before::before,.drop-after::after { content:""; position:absolute; z-index:3; inset-inline:0; height:2px; background:var(--green); pointer-events:none; }
+.drop-before::before { top:0; }
+.drop-after::after { bottom:0; }
+.bulk-place-notice { margin:-8px 0 16px; padding:10px 12px; border-radius:7px; color:var(--selected-ink); background:var(--selected-wash); font-size:14px; line-height:1.45; }
+.organization-choice input:focus-visible { outline:2px solid var(--green); outline-offset:3px; }
+.view-group-choices .segmented { width:100%; }
+.view-group-choices label { flex:1; min-width:0; position:relative; cursor:pointer; }
+.view-group-choices label span { display:flex; align-items:center; justify-content:center; min-height:44px; border-radius:5px; font-size:14px; }
+.view-group-choices input { margin:0; position:absolute; opacity:0; inset:0; width:100%; height:100%; cursor:pointer; }
+.view-group-choices input:checked + span { color:var(--selected-ink); background:var(--selected-wash); font-weight:600; }
+.view-group-choices input:focus-visible + span { outline:2px solid var(--green); outline-offset:-2px; }
+.visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+@media (max-width:767px) {
+  .editor-toolbar.organization-toolbar { display:flex; flex-wrap:wrap; }
+  .organization-toolbar .item-search { flex:1 1 8rem; min-width:0; border-top:0; padding-top:0; }
+  .list-view-actions { flex-wrap:wrap; gap:6px; }
+  .list-view-actions .secondary { min-height:44px; padding-inline:8px; font-size:13px; }
+  .list-mode-actions .text-button,.list-mode-actions .primary { padding-inline:6px; }
+  .list-mode-actions { gap:7px; }
+  .item-subgroup > :is(h2,h3) { font-size:20px; }
+  .editor-mode-active .checklist { padding-bottom:30px; }
+  dialog.list-view-dialog { position:fixed; inset:auto 0 0; margin:0; width:100%; max-width:none; max-height:calc(100dvh - 20px); border-radius:18px 18px 0 0; }
+  .list-view-dialog .dialog-inner { padding-bottom:max(20px,env(safe-area-inset-bottom)); }
+}
