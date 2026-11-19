@@ -211,6 +211,53 @@ test('visible reordering replaces only selected slots and guards the full order'
   assert.deepEqual(order(), [ids[3], ids[1], ids[0], ids[2]]);
 });
 
+test('group order is guarded, resettable, cleaned on deletion and remapped on copies', async t => {
+  const { act, listId, list, store } = await fixture(t);
+  const onList = (type, fields) => act(type, { listId, ...fields });
+  const alex = onList('recipient.create', { name: 'Alex' }).createdRecipientId;
+  const maya = onList('recipient.create', { name: 'Maya' }).createdRecipientId;
+  const kyoto = onList('place.create', { name: 'Kyoto', kind: 'city' }).createdPlaceId;
+  const tokyo = onList('place.create', { name: 'Tokyo', kind: 'city' }).createdPlaceId;
+  onList('item.create', { text: 'Gift', recipientIds: [alex, maya], availability: selected(kyoto, tokyo) });
+  onList('item.create', { text: 'Bag', availability: { mode: 'anywhere', placeIds: [] } });
+  onList('item.create', { text: 'Paper' });
+  const positions = list().items.map(item => [item.id, item.position]);
+  const people = [`person:${maya}`, 'unassigned', `person:${alex}`];
+  const places = [`place:${tokyo}`, 'anywhere', `place:${kyoto}`, 'unassigned'];
+  onList('group.reorder', { kind: 'person', groupIds: people, expectedGroupIds: [] });
+  onList('group.reorder', { kind: 'place', groupIds: places, expectedGroupIds: [] });
+  assert.deepEqual(list().personGroupOrder, people);
+  assert.deepEqual(list().placeGroupOrder, places);
+  assert.deepEqual(list().items.map(item => [item.id, item.position]), positions);
+  assert.throws(() => onList('group.reorder', { kind: 'person', groupIds: [], expectedGroupIds: [] }), { status: 409 });
+  assert.deepEqual(list().personGroupOrder, people);
+  for (const invalid of [[`person:${alex}`, `person:${alex}`], ['person:missing'], ['anywhere']]) {
+    assert.throws(() => onList('group.reorder', { kind: 'person', groupIds: invalid, expectedGroupIds: people }));
+  }
+
+  const copyResult = act('list.clone', { listId });
+  const clone = copyResult.lists.find(value => value.id === copyResult.createdListId);
+  const backup = store.export(owner);
+  const imported = store.import({ ...backup, lists: backup.lists.filter(value => value.id === listId) }, owner)
+    .lists.find(value => value.id !== listId && value.id !== clone.id);
+  for (const copy of [clone, imported]) {
+    const byName = (collection, name) => collection.find(entry => entry.name === name).id;
+    assert.deepEqual(copy.personGroupOrder, [`person:${byName(copy.recipients, 'Maya')}`, 'unassigned', `person:${byName(copy.recipients, 'Alex')}`]);
+    assert.deepEqual(copy.placeGroupOrder, [`place:${byName(copy.places, 'Tokyo')}`, 'anywhere', `place:${byName(copy.places, 'Kyoto')}`, 'unassigned']);
+  }
+  const person = list().recipients.find(entry => entry.id === maya);
+  const place = list().places.find(entry => entry.id === tokyo);
+  onList('recipient.delete', { recipientId: maya, expectedAssignmentToken: deletionToken(list(), 'recipient', person) });
+  onList('place.delete', { placeId: tokyo, expectedAssignmentToken: deletionToken(list(), 'place', place) });
+  assert.deepEqual(list().personGroupOrder, ['unassigned', `person:${alex}`]);
+  assert.deepEqual(list().placeGroupOrder, ['anywhere', `place:${kyoto}`, 'unassigned']);
+  assert.deepEqual(list().items.map(item => [item.id, item.position]), positions);
+  onList('group.reorder', { kind: 'person', groupIds: [], expectedGroupIds: list().personGroupOrder });
+  onList('group.reorder', { kind: 'place', groupIds: [], expectedGroupIds: list().placeGroupOrder });
+  assert.ok(!list().personGroupOrder?.length);
+  assert.ok(!list().placeGroupOrder?.length);
+});
+
 test('clone and backup copies preserve organization through remapped definitions and references', async t => {
   const { store, act, listId, list } = await fixture(t);
   let current = list();

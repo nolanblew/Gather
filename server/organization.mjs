@@ -77,6 +77,33 @@ function requireReference(ids, value, name) {
   if (!ids.has(value)) fail(`${name} is no longer available. Choose another or remove it.`);
 }
 
+const groupFields = { place: 'places', person: 'recipients' };
+
+function validateGroupOrder(list, kind, keys) {
+  const allowed = new Set((list[groupFields[kind]] ?? []).map(entry => `${kind}:${entry.id}`));
+  allowed.add('unassigned');
+  if (kind === 'place') allowed.add('anywhere');
+  if (!Array.isArray(keys) || keys.length > allowed.size || keys.some(key => !allowed.has(key)) ||
+      new Set(keys).size !== keys.length) fail('Choose distinct groups from this list.');
+}
+
+function setGroupOrder(list, kind, keys) {
+  const field = `${kind}GroupOrder`;
+  if (keys.length) list[field] = keys.slice();
+  else delete list[field];
+}
+
+export function reorderGroups(list, { kind, groupIds, expectedGroupIds }) {
+  if (kind !== 'person' && kind !== 'place') fail('Choose people or places to reorder.');
+  const current = list[`${kind}GroupOrder`] ?? [];
+  if (!Array.isArray(expectedGroupIds) || expectedGroupIds.length !== current.length ||
+      current.some((key, index) => key !== expectedGroupIds[index])) {
+    throw new InputError('The group order changed. Review the groups and try again.', 409, 'GROUP_ORDER_CHANGED');
+  }
+  validateGroupOrder(list, kind, groupIds);
+  setGroupOrder(list, kind, groupIds);
+}
+
 export function readOrganization(source, list, unique) {
   if (Object.hasOwn(source, 'numbered') && bool(source.numbered, 'Numbered')) list.numbered = true;
   const ids = {};
@@ -89,6 +116,13 @@ export function readOrganization(source, list, unique) {
     });
     if (normalized.length) list[field] = normalized;
     ids[field] = new Set(normalized.map(entry => entry.id));
+  }
+  for (const kind of Object.keys(groupFields)) {
+    const field = `${kind}GroupOrder`;
+    if (Object.hasOwn(source, field)) {
+      validateGroupOrder(list, kind, source[field]);
+      setGroupOrder(list, kind, source[field]);
+    }
   }
   return ids;
 }
@@ -230,6 +264,9 @@ export function editDictionary(list, type, command, payload) {
   const entry = entries.find(value => value.id === entryId);
   if (command === 'delete') {
     if (!entry || payload.expectedAssignmentToken !== assignmentToken(list, type, entry)) assignmentConflict();
+    const kind = type === 'recipient' ? 'person' : 'place';
+    const order = list[`${kind}GroupOrder`];
+    if (order) setGroupOrder(list, kind, order.filter(key => key !== `${kind}:${entryId}`));
     const remaining = entries.filter(value => value !== entry);
     if (remaining.length) list[field] = remaining;
     else delete list[field];
@@ -254,6 +291,11 @@ export function remapListContent(list, mapping, resetCompletion = false) {
   const result = { ...list, sections: remap(list.sections), items: remap(list.items) };
   if (list.places) result.places = remap(list.places);
   if (list.recipients) result.recipients = remap(list.recipients);
+  for (const kind of Object.keys(groupFields)) {
+    const order = list[`${kind}GroupOrder`];
+    if (order) setGroupOrder(result, kind, order.map(key => key.startsWith(kind + ':')
+      ? kind + ':' + mapping.get(key.slice(kind.length + 1)) : key));
+  }
   for (const item of result.items) {
     if (resetCompletion) item.checked = false;
     if (item.sectionId !== null) item.sectionId = mapping.get(item.sectionId);

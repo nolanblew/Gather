@@ -44,6 +44,7 @@ fun EditorSheet(
         val window = LocalGatherWindow.current
         val dialog = window.width >= 600.dp || window.height < 480.dp || window.folds.isNotEmpty()
         val itemEditor = editor is Editor.ItemForm
+        val groupOrder = editor is Editor.GroupOrder
         val maximumFormWidth = if (itemEditor) 440.dp else 560.dp
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         val visibility = remember { Animatable(0f) }
@@ -73,7 +74,7 @@ fun EditorSheet(
                     Modifier.widthIn(max = maximumFormWidth)
                         .fillMaxWidth()
                         .gatherPageInput(!closing)
-                        .verticalScroll(model.ui.editorScroll)
+                        .then(if (groupOrder) Modifier else Modifier.verticalScroll(model.ui.editorScroll))
                         .padding(start = 24.dp, end = 24.dp, top = 0.dp, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(if (itemEditor) 10.dp else 15.dp),
                 ) {
@@ -83,6 +84,7 @@ fun EditorSheet(
                         is Editor.ItemForm -> ItemForm(editor, state, model, dismiss, onConfirm)
                         is Editor.Filters -> FilterForm(editor, state, model, dismiss)
                         is Editor.BulkAdd -> BulkAddForm(editor, state, model, dismiss)
+                        is Editor.GroupOrder -> GroupOrderForm(editor, state, model, dismiss)
                         is Editor.Definitions -> DefinitionsForm(editor, state, model, dismiss, onConfirm)
                         is Editor.SectionForm ->
                             SectionForm(editor, state, model, dismiss, onConfirm)

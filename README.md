@@ -8,7 +8,7 @@ Gather is a responsive home for everyday lists, gift ideas, projects, and reusab
 
 Use **Add detail** to add a description, quantity, section, alternative places, or the people an item is for. **Select items** lets you add people or places to several items together. Places and people belong to the list.
 
-Ordinary lists open in date-added order. Use **View** to filter items, group them by place or person, or change the sort. A shared item appears in each applicable group. Checking it off updates every appearance. Manual reordering moves it within its section, including when viewing a filtered group. **Number items** displays the shared sequence.
+Ordinary lists open in date-added order. Use **View** to filter items, group them by place or person, or change the sort. A shared item appears in each applicable group. Checking it off updates every appearance. Manual reordering moves it within its section, including when viewing a filtered group. To put stops or people in trip order, group the list by place or person, enter reorder mode from the list menu, then choose **Reorder groups**. Drag a group by its handle or use its move buttons. Everyone on the list sees the saved order. **Reset order** restores the default for that grouping. **Number items** displays the shared item sequence.
 
 These features use workspace version 4. Update the server before clients. Existing lists and earlier backups retain their assignments. [Shared API](docs/API.md)
 

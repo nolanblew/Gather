@@ -7,10 +7,10 @@ enum class ItemSort(val label: String) {
     Manual("Manual"),
 }
 
-enum class ItemGrouping(val label: String) {
+enum class ItemGrouping(val label: String, val wireKind: String? = null) {
     None("None"),
-    Place("Place"),
-    Person("Person"),
+    Place("Place", "place"),
+    Person("Person", "person"),
 }
 
 data class ItemViewRow(
@@ -37,7 +37,52 @@ data class ItemViewGroup(val id: String, val title: String?, val rows: List<Item
 }
 
 private const val ANYWHERE_GROUP = "anywhere"
-private const val UNSET_GROUP = "unset"
+private const val UNASSIGNED_GROUP = "unassigned"
+
+internal data class ItemGroupLabel(val id: String, val title: String)
+
+internal fun GatherList.storedGroupOrder(grouping: ItemGrouping): List<String> = when (grouping) {
+    ItemGrouping.None -> emptyList()
+    ItemGrouping.Place -> placeGroupOrder
+    ItemGrouping.Person -> personGroupOrder
+}
+
+private fun GatherList.groupLabels(grouping: ItemGrouping): Map<String, String> = when (grouping) {
+    ItemGrouping.None -> emptyMap()
+    ItemGrouping.Person -> recipients.associate { "person:${it.id}" to it.name } +
+        (UNASSIGNED_GROUP to "No recipient")
+    ItemGrouping.Place -> places.associate { "place:${it.id}" to it.label } +
+        mapOf(ANYWHERE_GROUP to "Anywhere", UNASSIGNED_GROUP to "No places set")
+}
+
+private fun ListItem.groupKeys(grouping: ItemGrouping, labels: Map<String, String>): List<String> {
+    val assigned = when (grouping) {
+        ItemGrouping.None -> return emptyList()
+        ItemGrouping.Person -> peopleIds.map { "person:$it" }
+        ItemGrouping.Place -> availability.placeIds.map { "place:$it" }
+    }
+    return assigned.filter { it in labels }.distinct().ifEmpty {
+        listOf(if (grouping == ItemGrouping.Place && availability.mode == "anywhere") ANYWHERE_GROUP else UNASSIGNED_GROUP)
+    }
+}
+
+private fun alphabeticalGroupOrder(labels: Map<String, String>): Comparator<String> =
+    compareBy<String> { it == UNASSIGNED_GROUP }
+        .thenBy { it == ANYWHERE_GROUP }
+        .thenBy(String.CASE_INSENSITIVE_ORDER) { labels.getValue(it) }
+        .thenBy { it }
+
+private fun GatherList.groupOrderComparator(grouping: ItemGrouping, labels: Map<String, String>): Comparator<String> {
+    val ranks = storedGroupOrder(grouping).withIndex().associate { (index, id) -> id to index }
+    return compareBy<String> { ranks[it] ?: Int.MAX_VALUE }.then(alphabeticalGroupOrder(labels))
+}
+
+internal fun GatherList.realizedGroupLabels(grouping: ItemGrouping): List<ItemGroupLabel> {
+    val labels = groupLabels(grouping)
+    return items.flatMapTo(linkedSetOf()) { it.groupKeys(grouping, labels) }
+        .sortedWith(groupOrderComparator(grouping, labels))
+        .map { ItemGroupLabel(it, labels.getValue(it)) }
+}
 
 fun GatherList.defaultItemSort(): ItemSort = if (numbered) ItemSort.Manual else ItemSort.DateAdded
 
@@ -66,35 +111,18 @@ fun GatherList.viewGroups(items: List<ListItem>, grouping: ItemGrouping): List<I
     if (grouping == ItemGrouping.None) {
         return listOf(ItemViewGroup("", null, items.map { ItemViewRow(it) }))
     }
-    val labels = if (grouping == ItemGrouping.Person) recipients.associate { "id:${it.id}" to it.name }
-        else places.associate { "id:${it.id}" to it.label }
+    val labels = groupLabels(grouping)
+    val alphabetical = alphabeticalGroupOrder(labels)
     val groups = linkedMapOf<String, MutableList<ItemViewRow>>()
-    fun title(id: String): String = when (id) {
-        UNSET_GROUP -> if (grouping == ItemGrouping.Person) "No recipient" else "No places set"
-        ANYWHERE_GROUP -> "Anywhere"
-        else -> labels.getValue(id)
-    }
     items.forEach { item ->
-        val assigned = when (grouping) {
-            ItemGrouping.Person -> item.peopleIds
-            ItemGrouping.Place -> item.availability.placeIds
-            ItemGrouping.None -> emptyList()
-        }
-        val available = assigned.map { "id:$it" }.filter { it in labels }.distinct()
-            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, ::title)).ifEmpty {
-                listOf(if (grouping == ItemGrouping.Place && item.availability.mode == "anywhere") ANYWHERE_GROUP else UNSET_GROUP)
-            }
-        val names = available.map(::title)
+        val available = item.groupKeys(grouping, labels).sortedWith(alphabetical)
+        val names = available.map(labels::getValue)
         available.forEachIndexed { index, id ->
             groups.getOrPut(id) { mutableListOf() } += ItemViewRow(item, names, index)
         }
     }
-    return groups.map { (id, rows) -> ItemViewGroup(id, title(id), rows) }.sortedWith(
-        compareBy<ItemViewGroup> { it.id == UNSET_GROUP }
-            .thenBy { it.id == ANYWHERE_GROUP }
-            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.title.orEmpty() }
-            .thenBy { it.id },
-    )
+    return groups.keys.sortedWith(groupOrderComparator(grouping, labels))
+        .map { id -> ItemViewGroup(id, labels.getValue(id), groups.getValue(id)) }
 }
 
 internal sealed interface DetailEntry {

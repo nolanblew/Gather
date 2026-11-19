@@ -128,6 +128,14 @@ export function validateBackup(value: unknown): asserts value is Workspace {
         recipientIds.add(recipient.id);
       }
     }
+    for (const kind of ['person', 'place'] as const) {
+      const keys = l[`${kind}GroupOrder`];
+      if (keys === undefined) continue;
+      const ids = kind === 'person' ? recipientIds : placeIds;
+      if (!Array.isArray(keys) || new Set(keys).size !== keys.length || keys.some(key =>
+        key !== 'unassigned' && !(kind === 'place' && key === 'anywhere') &&
+        !(typeof key === 'string' && key.startsWith(kind + ':') && ids.has(key.slice(kind.length + 1))))) fail();
+    }
     for (const i of l.items) {
       if (!i) fail();
       id(i.id);

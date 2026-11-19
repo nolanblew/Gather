@@ -285,4 +285,37 @@ class GatherModelTest {
         assertEquals(listOf("Maya"), groups[0].rows.single().alsoUnder)
         assertEquals(listOf("other", "shared"), movedItemIds(listOf("shared", "other"), "shared", "other"))
     }
+
+    @Test
+    fun storedGroupOrderAppliesAcrossSectionsAndAppendsNewGroups() {
+        val list = Json.decodeFromString<GatherList>(
+            """
+            {
+              "id": "trip", "title": "Trip",
+              "sections": [{"id": "first", "title": "First"}, {"id": "second", "title": "Second", "position": 1}],
+              "recipients": [{"id": "a", "name": "Alex"}, {"id": "m", "name": "Maya"}, {"id": "s", "name": "Sam"}],
+              "personGroupOrder": ["person:s", "person:m"],
+              "placeGroupOrder": ["unassigned", "anywhere"],
+              "items": [
+                {"id": "one", "text": "Gift", "sectionId": "first", "recipientIds": ["a", "m", "s"]},
+                {"id": "two", "text": "Snack", "sectionId": "second", "recipientIds": ["a", "s"], "availability": {"mode":"anywhere"}},
+                {"id": "three", "text": "Postcard"}
+              ]
+            }
+            """.trimIndent(),
+        )
+        val joinedGroups = list.detailEntries(list.items, ItemGrouping.Person, filtered = false, splitCompleted = false)
+            .filterIsInstance<DetailEntry.GroupHeading>().map { it.title }
+        assertEquals(listOf("No recipient", "Sam", "Maya", "Alex", "Sam", "Alex"), joinedGroups)
+        val filtered = list.items.filter(ListFilter(person = "m")::matches)
+        assertEquals(listOf("Sam", "Maya", "Alex"), list.viewGroups(filtered, ItemGrouping.Person).map { it.title })
+        assertEquals(
+            listOf("person:s", "person:m", "person:a", "unassigned"),
+            list.realizedGroupLabels(ItemGrouping.Person).map { it.id },
+        )
+        assertEquals(listOf("unassigned", "anywhere"), list.realizedGroupLabels(ItemGrouping.Place).map { it.id })
+        val primaryRows = list.viewGroups(filtered, ItemGrouping.Person).flatMap { it.rows }.filter { it.isPrimaryAppearance }
+        assertEquals(listOf("one"), primaryRows.map { it.item.id })
+        assertEquals(listOf("Maya", "Sam"), primaryRows.single().alsoUnder)
+    }
 }

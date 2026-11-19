@@ -26,38 +26,40 @@ import kotlin.math.abs
 
 private val LazyListItemInfo.center: Float get() = offset + size / 2f
 
-internal class ItemDragState(private val scroll: LazyListState) {
-    private data class Handle(val entry: DetailEntry.Row, val bounds: Rect)
+internal data class ReorderDragEntry<T>(val key: String, val data: T, val siblingKeys: () -> Set<String>)
 
-    private val handles = mutableMapOf<String, Handle>()
+internal class ReorderDragState<T>(val scroll: LazyListState) {
+    private data class Handle<T>(val entry: ReorderDragEntry<T>, val bounds: Rect)
+
+    private val handles = mutableMapOf<String, Handle<T>>()
     var rootPosition = Offset.Zero
-    private var active by mutableStateOf<DetailEntry.Row?>(null)
+    private var active by mutableStateOf<ReorderDragEntry<T>?>(null)
     private var pointerY by mutableFloatStateOf(0f)
     private var startOffset = 0
     private var eligibleKeys = emptySet<String>()
 
     val activeKey get() = active?.key
 
-    fun handle(key: String, entry: DetailEntry.Row, bounds: Rect) {
-        handles[key] = Handle(entry, bounds)
+    fun handle(entry: ReorderDragEntry<T>, bounds: Rect) {
+        handles[entry.key] = Handle(entry, bounds)
     }
 
     fun removeHandle(key: String) {
         handles.remove(key)
     }
 
-    fun handleAt(position: Offset): DetailEntry.Row? {
+    fun handleAt(position: Offset): ReorderDragEntry<T>? {
         val point = rootPosition + position
         return scroll.layoutInfo.visibleItemsInfo.firstNotNullOfOrNull { info ->
             handles[info.key as? String]?.takeIf { it.bounds.contains(point) }?.entry
         }
     }
 
-    fun start(entry: DetailEntry.Row, downY: Float) {
+    fun start(entry: ReorderDragEntry<T>, downY: Float) {
         val info = scroll.layoutInfo.visibleItemsInfo.find { it.key == entry.key } ?: return
         startOffset = downY.toInt() + scroll.layoutInfo.viewportStartOffset - info.center.toInt()
         pointerY = downY
-        eligibleKeys = entry.bucket.rows.mapTo(hashSetOf(), entry::siblingKey)
+        eligibleKeys = entry.siblingKeys()
         active = entry
     }
 
@@ -97,14 +99,13 @@ internal class ItemDragState(private val scroll: LazyListState) {
 }
 
 @Composable
-internal fun Modifier.itemDragInput(
-    drag: ItemDragState,
-    scroll: LazyListState,
+internal fun <T, G : Any> Modifier.reorderDragInput(
+    drag: ReorderDragState<T>,
     enabled: Boolean,
-    orderToken: String?,
-    onDrop: (DetailEntry.Row, String, String) -> Unit,
+    expected: G?,
+    onDrop: (T, String, G) -> Unit,
 ): Modifier {
-    val currentToken by rememberUpdatedState(orderToken)
+    val currentExpected by rememberUpdatedState(expected)
     val currentDrop by rememberUpdatedState(onDrop)
     val edgeSize = with(LocalDensity.current) { 64.dp.toPx() }
     val maxSpeed = with(LocalDensity.current) { 18.dp.toPx() }
@@ -112,7 +113,7 @@ internal fun Modifier.itemDragInput(
         while (drag.activeKey != null) {
             withFrameNanos { }
             val speed = drag.scrollSpeed(edgeSize)
-            if (speed != 0f) scroll.scrollBy(speed * maxSpeed)
+            if (speed != 0f) drag.scroll.scrollBy(speed * maxSpeed)
         }
     }
     if (!enabled) return this
@@ -121,8 +122,7 @@ internal fun Modifier.itemDragInput(
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                 val entry = drag.handleAt(down.position) ?: return@awaitEachGesture
-                val token = currentToken ?: return@awaitEachGesture
-                if (entry.bucket.itemIds.size < 2) return@awaitEachGesture
+                val guard = currentExpected ?: return@awaitEachGesture
                 try {
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -132,7 +132,7 @@ internal fun Modifier.itemDragInput(
                             drag.finish()
                             if (target != null) {
                                 change.consume()
-                                currentDrop(entry, target, token)
+                                currentDrop(entry.data, target, guard)
                             }
                             break
                         }
@@ -152,18 +152,24 @@ internal fun Modifier.itemDragInput(
 }
 
 @Composable
-internal fun ItemDragHandle(entry: DetailEntry.Row, drag: ItemDragState, enabled: Boolean) {
-    val text = entry.row.item.text
-    DisposableEffect(entry.key, drag) {
+internal fun <T> ReorderDragHandle(
+    entry: ReorderDragEntry<T>,
+    drag: ReorderDragState<T>,
+    label: String,
+    enabled: Boolean,
+) {
+    DisposableEffect(entry.key, drag, enabled) {
         onDispose { drag.removeHandle(entry.key) }
     }
     Box(
-        Modifier.size(48.dp).onGloballyPositioned { drag.handle(entry.key, entry, it.boundsInRoot()) },
+        Modifier.size(48.dp).then(
+            if (enabled) Modifier.onGloballyPositioned { drag.handle(entry, it.boundsInRoot()) } else Modifier,
+        ),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             Icons.Outlined.DragIndicator,
-            "Drag $text",
+            "Drag $label".takeIf { enabled },
             tint = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant
                 else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .38f),
         )

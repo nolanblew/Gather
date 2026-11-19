@@ -77,6 +77,8 @@ sealed interface Editor {
 
     data class BulkAdd(val list: GatherList, val itemIds: Set<String>, val places: Boolean) : Editor
 
+    data class GroupOrder(val listId: String, val grouping: ItemGrouping) : Editor
+
     data class Definitions(val list: GatherList) : Editor
 
     data class CategoryForm(val category: Category? = null) : Editor
@@ -1043,6 +1045,10 @@ fun DetailScreen(
     val narrowed = filter.active || query.isNotBlank()
     val sort = if (reordering || !itemViews) ItemSort.Manual else model.itemSort(list)
     val grouping = ui.itemGrouping[list.id] ?: ItemGrouping.None
+    val canReorderGroups = remember(list, grouping) {
+        grouping != ItemGrouping.None &&
+            (list.storedGroupOrder(grouping).isNotEmpty() || list.realizedGroupLabels(grouping).size > 1)
+    }
     val canFilter =
         filter.active || list.usesPlaces || list.usesRecipients ||
             (list.kind == "checklist" && list.checkedCount > 0)
@@ -1057,7 +1063,7 @@ fun DetailScreen(
         list.detailEntries(visibleItems, grouping, narrowed, itemViews && list.separatesCompletedItems)
     }
     val reorderRows = remember(entries) { entries.filterIsInstance<DetailEntry.Row>().associateBy { it.key } }
-    val drag = remember(list.id, scroll) { ItemDragState(scroll) }
+    val drag = remember(list.id, scroll) { ReorderDragState<DetailEntry.Row>(scroll) }
     val dragTarget by remember(drag) { derivedStateOf { drag.targetKey() } }
     val focusManager = LocalFocusManager.current
     val openFilter = { draft: ListFilter -> edit(Editor.Filters(list, draft)) }
@@ -1148,7 +1154,7 @@ fun DetailScreen(
         )
     LazyColumn(
         Modifier.widthIn(max = 840.dp).fillMaxSize()
-            .itemDragInput(drag, scroll, reordering && writable, list.orderToken) { source, target, token ->
+            .reorderDragInput(drag, reordering && writable, list.orderToken) { source, target, token ->
                 val from = reorderRows[source.key]
                 val to = reorderRows[target]
                 if (from != null && to != null && from.bucketKey == to.bucketKey && from.bucket.itemIds == source.bucket.itemIds) {
@@ -1239,7 +1245,7 @@ fun DetailScreen(
                                             openFilter(filter)
                                         },
                                     )
-                                if (itemViews && visibleItems.size > 1 && !reordering)
+                                if (itemViews && (visibleItems.size > 1 || canReorderGroups) && !reordering)
                                     DropdownMenuItem(
                                         text = { Text("Edit order") },
                                         onClick = {
@@ -1511,6 +1517,9 @@ fun DetailScreen(
                         ui.itemSelections[list.id] = emptySet()
                     },
                     finishMode = ::finishMode,
+                    openGroupOrder = if (canReorderGroups) {
+                        { edit(Editor.GroupOrder(list.id, grouping)) }
+                    } else null,
                     openBulk = { places ->
                         if (!selected.isNullOrEmpty()) edit(Editor.BulkAdd(list, selected, places))
                     },
@@ -1665,7 +1674,12 @@ fun DetailScreen(
                         selected = rowSelected,
                         highlighted = animatingDrag || moveTarget,
                         dragHandle = if (!reordering) null else {
-                            { ItemDragHandle(entry, drag, writable && entry.bucket.itemIds.size > 1) }
+                            {
+                                ReorderDragHandle(
+                                    ReorderDragEntry(entry.key, entry) { entry.bucket.rows.mapTo(hashSetOf(), entry::siblingKey) },
+                                    drag, item.text, writable && entry.bucket.itemIds.size > 1,
+                                )
+                            }
                         },
                         reorderMenu = if (!reordering) null else {
                             { ItemReorderMenu(item.text, writable && list.orderToken != null, moveUp, moveDown) }

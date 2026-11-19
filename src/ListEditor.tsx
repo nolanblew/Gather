@@ -1,15 +1,18 @@
 import AnimatedChecklist from './AnimatedChecklist';
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { ArrowDown, ArrowLeft, ArrowUp, Check, ChevronDown, Copy, GripVertical, Link2, MapPin, MoreHorizontal, Plus, Search, SlidersHorizontal, SquareCheck, Star, UserRoundPlus, Users, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { ArrowDown, ArrowLeft, ArrowUp, Check, ChevronDown, Copy, GripVertical, Link2, ListOrdered, MapPin, MoreHorizontal, Plus, Search, SlidersHorizontal, SquareCheck, Star, UserRoundPlus, Users, X } from 'lucide-react';
 import { useAuth } from './auth';
 import Dialog from './Dialog';
+import GroupOrderDialog from './GroupOrderDialog';
 import ItemEditor, { makeItemDraft, PersonPicker, PlacesPicker } from './ItemEditor';
 import { DescriptionPreview, DictionaryDialog, ViewDialog } from './OrganizationDetails';
-import { byPosition, canonicalItemGroups, itemGroupIds, itemOrdinals, reorderItemIds, splitItemGroups, type ItemGrouping, type ItemSort } from './itemOrder';
+import { byPosition, canonicalItemGroups, itemGroupIds, itemOrdinals, reorderItemIds, sortItemGroupIds, splitItemGroups, type ItemGrouping, type ItemSort } from './itemOrder';
 import { emptyFilters, filterDefaults, filterLabels, hasFilters, itemRecipientIds, matchesListFilters, namedPersonId, namedPlaceId, noAvailability, orderGuard, placeLabel, placeSummary } from './organization';
 import { useItemDrag } from './useItemDrag';
 import type { ListFilters } from './organization';
 import type { Category, GatherList, Item, Mutation, Payload, Section, Workspace } from './types';
+
+const emptyGroupOrder: string[] = [];
 
 export interface ListView {
   query: string;
@@ -70,6 +73,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
   const [sort, setSort] = useState<ItemSort>(() => savedView?.sort ?? storedSort(sortKey) ?? (list.numbered ? 'manual' : 'added'));
   const [groupBy, setGroupBy] = useState<ItemGrouping>(savedView?.groupBy ?? 'none');
   const [mode, setMode] = useState<'select' | 'reorder' | null>(null);
+  const [groupOrderOpen, setGroupOrderOpen] = useState(false);
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const [bulk, setBulk] = useState<'place' | 'person' | null>(null);
   const [actionMessage, setActionMessage] = useState('');
@@ -83,10 +87,25 @@ export default function ListEditor({ list, category, icon, badges, organization,
   const previousList = useRef(list);
   const done = list.items.filter(item => item.checked).length;
   const isChecklist = list.kind !== 'notes' && !list.isTemplate;
-  const groups = useMemo(() => canonicalItemGroups(list, sort), [list, sort]);
+  const displayedSort = mode === 'reorder' ? 'manual' : sort;
+  const groups = useMemo(() => canonicalItemGroups(list, displayedSort), [list, displayedSort]);
   const ordinals = useMemo(() => list.numbered ? itemOrdinals(list) : null, [list]);
-  const places = new Map((list.places || []).map(place => [place.id, place]));
-  const recipients = new Map((list.recipients || []).map(person => [person.id, person]));
+  const places = useMemo(() => new Map((list.places || []).map(place => [place.id, place])), [list.places]);
+  const recipients = useMemo(() => new Map((list.recipients || []).map(person => [person.id, person])), [list.recipients]);
+  const groupLabel = useCallback((id: string) => {
+    if (id === 'unassigned') return groupBy === 'place' ? 'No places set' : 'No recipient';
+    if (id === 'anywhere') return 'Anywhere';
+    if (id.startsWith('place:')) {
+      const place = places.get(id.slice(6));
+      return place ? placeLabel(place) : '';
+    }
+    return recipients.get(id.slice(7))?.name || '';
+  }, [groupBy, places, recipients]);
+  const storedGroupOrder = (groupBy === 'person' ? list.personGroupOrder : groupBy === 'place' ? list.placeGroupOrder : undefined) ?? emptyGroupOrder;
+  const orderedGroupIds = useMemo(() => groupBy === 'none' ? emptyGroupOrder : sortItemGroupIds(
+    [...new Set(list.items.flatMap(item => itemGroupIds(item, groupBy)))], storedGroupOrder, groupLabel
+  ), [list.items, groupBy, storedGroupOrder, groupLabel]);
+  const groupPositions = useMemo(() => new Map(orderedGroupIds.map((id, index) => [id, index])), [orderedGroupIds]);
   const filterQuery = query.trim().toLocaleLowerCase();
   const activePlace = namedPlaceId(filters.place);
   const activePerson = namedPersonId(filters.person);
@@ -177,6 +196,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
     if (!reordered) return;
     setActionMessage('');
     if (await mutate('item.reorderVisible', { listId: list.id, itemIds: reordered, expectedOrderToken: token })) {
+      chooseSort('manual');
       setActionMessage(`Moved ${list.items.find(item => item.id === sourceId)?.text || 'item'}.`);
     }
   };
@@ -184,7 +204,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
     setSort(next);
     try { localStorage.setItem(sortKey, next); } catch { /* The current session still remembers the sort. */ }
   };
-  const drag = useItemDrag(({ itemIds, id, token }, destination) => {
+  const drag = useItemDrag<string>(({ itemIds, id, token }, destination) => {
     void saveReorder(itemIds, id, destination.id, destination.after, token);
   });
   const endMode = () => {
@@ -194,10 +214,14 @@ export default function ListEditor({ list, category, icon, badges, organization,
     const selector = mode === 'select' ? '[data-select-items]' : '[aria-label="List actions"]';
     requestAnimationFrame(() => (editorRef.current?.querySelector<HTMLElement>(selector) || addRef.current)?.focus());
   };
-  const startReorder = () => {
-    chooseSort('manual');
+  const startReorder = (groupsOnly = false) => {
     setActionMessage('');
     setMode('reorder');
+    if (groupsOnly) {
+      clearError();
+      setGroupOrderOpen(true);
+      return;
+    }
     requestAnimationFrame(() => editorRef.current?.querySelector<HTMLButtonElement>('[data-finish-mode]')?.focus());
   };
   const toggleSelection = (id: string) => setSelection(previous => {
@@ -212,15 +236,6 @@ export default function ListEditor({ list, category, icon, badges, organization,
       endMode();
       setActionMessage(`Applied changes to ${selectedCount} ${selectedCount === 1 ? 'item' : 'items'}.`);
     }
-  };
-  const groupLabel = (id: string) => {
-    if (id === 'unassigned') return groupBy === 'place' ? 'No places set' : 'No recipient';
-    if (id === 'anywhere') return 'Anywhere';
-    if (id.startsWith('place:')) {
-      const place = places.get(id.slice(6));
-      return place ? placeLabel(place) : '';
-    }
-    return recipients.get(id.slice(7))?.name || '';
   };
   const row = (item: Item, subgroup: string, bucket: string, itemIds: string[], index: number) => {
     const memberships = subgroup ? itemGroupIds(item, groupBy) : [];
@@ -289,16 +304,15 @@ export default function ListEditor({ list, category, icon, badges, organization,
   };
 
   const renderGroupRows = (items: Item[], sectionId: string | null, completed = false) => {
-    const groupSort = (id: string) => id === 'unassigned' ? 2 : id === 'anywhere' ? 1 : 0;
     const Heading = list.sections.length ? 'h3' : 'h2';
     return splitItemGroups(items, groupBy).sort((left, right) =>
-      groupSort(left.id) - groupSort(right.id) || groupLabel(left.id).localeCompare(groupLabel(right.id)) || left.id.localeCompare(right.id)
+      (groupPositions.get(left.id) ?? 0) - (groupPositions.get(right.id) ?? 0)
     ).map(group => {
       const itemIds = mode === 'reorder' ? group.items.map(item => item.id) : [];
       const bucket = JSON.stringify([sectionId, completed, group.id]);
       const rows = group.items.map((item, index) => row(item, group.id, bucket, itemIds, index));
       return group.id ? <section className="item-subgroup" key={group.id}>
-        <Heading>{groupLabel(group.id)}</Heading>{rows}
+        <Heading data-motion-row={bucket}>{groupLabel(group.id)}</Heading>{rows}
       </section> : rows;
     });
   };
@@ -307,7 +321,8 @@ export default function ListEditor({ list, category, icon, badges, organization,
   const showDone = doneOpen ?? filtered;
   const orderedSections = list.sections.slice().sort(byPosition);
   const showCheckedSections = Boolean(mode === 'reorder' || groupBy !== 'none');
-  const canReorder = Boolean(list.orderToken && list.items.length > 1);
+  const canReorderItems = Boolean(list.orderToken && list.items.length > 1);
+  const canReorderGroups = groupBy !== 'none' && (orderedGroupIds.length > 1 || storedGroupOrder.length > 0);
   return <div className={`editor${mode ? ' editor-mode-active' : ''}`} ref={editorRef} onKeyDown={event => {
     if (event.key === 'Escape' && drag.preview) { event.stopPropagation(); drag.cancel(); }
   }}>
@@ -324,7 +339,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
         <ActionMenu label="List actions">
           <button onClick={edit}>Edit details</button>
           {!mode && list.items.length > 0 && <button onClick={() => openOverlay('filters')}>Filter this list</button>}
-          {!mode && canReorder && <button disabled={busy} onClick={startReorder}>Reorder items</button>}
+          {!mode && (canReorderItems || canReorderGroups) && <button disabled={busy} onClick={() => startReorder(!canReorderItems)}>{canReorderItems ? 'Reorder items' : 'Reorder groups'}</button>}
           {organization && list.role !== 'editor' && <button aria-pressed={Boolean(list.numbered)} aria-description={list.shared ? 'Everyone who can see this list sees item numbers.' : undefined} disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, numbered: !list.numbered, ...orderGuard(list, true) })}>{list.numbered && <Check size={16} aria-hidden="true" />}Number items</button>}
           {detailsExist && <button onClick={() => setShowDetails(!showDetails)}>{showDetails ? 'Hide item details' : 'Show item details'}</button>}
           <button onClick={() => section()}>Add section</button>
@@ -370,15 +385,20 @@ export default function ListEditor({ list, category, icon, badges, organization,
     {mode === 'reorder' && <>
       <div className="list-mode-bar" aria-label="Reorder items">
         <strong className="mode-title">Manual order</strong>
-        <button className="primary" data-finish-mode="" disabled={busy} onClick={endMode}>Done</button>
+        <div className="list-mode-actions">
+          {canReorderGroups && <button className="secondary" disabled={busy} aria-haspopup="dialog" onClick={() => {
+            clearError(); setGroupOrderOpen(true);
+          }}><ListOrdered size={17} aria-hidden="true" />Reorder groups</button>}
+          <button className="primary" data-finish-mode="" disabled={busy} onClick={endMode}>Done</button>
+        </div>
       </div>
-      <p className="list-mode-help">Drag a handle or use the row menu to move an item {groupBy === 'none' ? 'within its section' : 'within its group'}.</p>
+      {canReorderItems && <p className="list-mode-help">Drag a handle or use the row menu to move an item {groupBy === 'none' ? 'within its section' : 'within its group'}.</p>}
     </>}
     <div className={actionMessage ? 'filter-message' : 'visually-hidden'} role="status">{actionMessage}</div>
     {list.numbered && filtered && shown > 0 && shown < list.items.length && <p className="small-muted numbered-filter-help">Numbers follow the full list order.</p>}
     {filterMessage && <p className="filter-message" role="status">{filterMessage}</p>}
     {hiddenItemId && <div className="filtered-save" role="status">Item saved. It isn't shown with these filters. <button className="text-button" onClick={() => viewItem(hiddenItemId)}>View item</button></div>}
-    <AnimatedChecklist items={list.items} count={list.items.length} view={JSON.stringify([sort, groupBy, filters, query, showDone])}>
+    <AnimatedChecklist items={list.items} count={list.items.length} view={JSON.stringify([displayedSort, groupBy, filters, query, showDone, storedGroupOrder])}>
       {!list.items.length && !filtered && <p className="editor-empty">Add your first item.</p>}
       {groups.map((group, index) => {
         const visible = group.items.filter(item => isVisible(item) && (!isChecklist || list.numbered || !item.checked));
@@ -419,6 +439,12 @@ export default function ListEditor({ list, category, icon, badges, organization,
     {overlay === 'filters' && <ViewDialog list={list} filters={activeFilters} query={filterQuery} sort={sort} groupBy={groupBy} close={() => setOverlay(null)} apply={(next, nextSort, nextGroup) => {
       setFilters(next); if (nextSort !== sort) chooseSort(nextSort); setGroupBy(nextGroup); setOverlay(null); setFilterMessage(''); setHiddenItemId(null); setDoneOpen(null);
     }} />}
+    {mode === 'reorder' && groupOrderOpen && groupBy !== 'none' && <GroupOrderDialog
+      groups={orderedGroupIds.map(id => ({ id, label: groupLabel(id) }))}
+      preferred={storedGroupOrder} busy={busy} error={error}
+      close={() => { clearError(); setGroupOrderOpen(false); }}
+      save={async (groupIds, expectedGroupIds) => Boolean(await mutate('group.reorder', { listId: list.id, kind: groupBy, groupIds, expectedGroupIds }))}
+    />}
     {bulk && <Dialog title={bulk === 'place' ? 'Add places' : 'Add people'} busy={busy} close={() => { clearError(); setBulk(null); }}>
       {error && <div className="dialog-error" role="alert">{error}</div>}
       {bulk === 'place' ? <PlacesPicker

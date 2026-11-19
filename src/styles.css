@@ -159,6 +159,13 @@ button.assigned-value:hover { background:var(--subtle-hover); }
 .view-group-choices input:checked + span { color:var(--selected-ink); background:var(--selected-wash); font-weight:600; }
 .view-group-choices input:focus-visible + span { outline:2px solid var(--green); outline-offset:-2px; }
 .visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+.group-order-dialog button { touch-action:manipulation; }
+.group-order-scroll { max-height:min(46dvh, 24rem); overflow-y:auto; overscroll-behavior:contain; border:1px solid var(--border); border-radius:8px; }
+.group-order-list { margin:0; padding:0; list-style:none; }
+.group-order-row { display:flex; align-items:center; gap:4px; min-height:52px; padding:3px 6px; }
+.group-order-row + .group-order-row { border-top:1px solid var(--border); }
+.group-order-row .icon-button { flex-shrink:0; min-width:44px; min-height:44px; }
+.group-order-label { flex:1; min-width:0; padding-inline:4px; font-size:15px; overflow-wrap:anywhere; }
 @media (max-width:767px) {
   .editor-toolbar.organization-toolbar { display:flex; flex-wrap:wrap; }
   .organization-toolbar .item-search { flex:1 1 8rem; min-width:0; border-top:0; padding-top:0; }
@@ -168,6 +175,6 @@ button.assigned-value:hover { background:var(--subtle-hover); }
   .list-mode-actions { gap:7px; }
   .item-subgroup > :is(h2,h3) { font-size:20px; }
   .editor-mode-active .checklist { padding-bottom:30px; }
-  dialog.list-view-dialog { position:fixed; inset:auto 0 0; margin:0; width:100%; max-width:none; max-height:calc(100dvh - 20px); border-radius:18px 18px 0 0; }
-  .list-view-dialog .dialog-inner { padding-bottom:max(20px,env(safe-area-inset-bottom)); }
+  dialog:is(.list-view-dialog,.group-order-dialog) { position:fixed; inset:auto 0 0; margin:0; width:100%; max-width:none; max-height:calc(100dvh - 20px); border-radius:18px 18px 0 0; }
+  :is(.list-view-dialog,.group-order-dialog) .dialog-inner { padding-bottom:max(20px,env(safe-area-inset-bottom)); }
 }

@@ -5,6 +5,7 @@ interface Props {
   items: object;
   view: string;
   count: number;
+  className?: string;
 }
 
 function visibleRows(root: HTMLElement) {
@@ -63,5 +64,5 @@ export default class AnimatedChecklist extends Component<Props> {
   }
 
   componentWillUnmount() { for (const animation of this.effects) animation.cancel(); }
-  render() { return <div className="checklist" ref={this.root}>{this.props.children}</div>; }
+  render() { return <div className={this.props.className ?? 'checklist'} ref={this.root}>{this.props.children}</div>; }
 }

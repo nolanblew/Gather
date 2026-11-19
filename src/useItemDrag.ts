@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
 
 type Destination = { id: string; after: boolean };
-type Source = { group: string; id: string; itemIds: string[]; token: string };
-type Session = {
-  source: Source;
+type Source<T> = { group: string; id: string; itemIds: string[]; token: T };
+type Session<T> = {
+  source: Source<T>;
   handle: HTMLElement;
+  scrollArea: HTMLElement | null;
   pointerId: number;
   startX: number;
   startY: number;
@@ -14,12 +15,12 @@ type Session = {
   destination: Destination | null;
 };
 
-export function useItemDrag(drop: (source: Source, destination: Destination) => void) {
-  const [preview, setPreview] = useState<{ source: Source; destination: Destination | null } | null>(null);
-  const session = useRef<Session | null>(null);
+export function useItemDrag<T>(drop: (source: Source<T>, destination: Destination) => void) {
+  const [preview, setPreview] = useState<{ source: Source<T>; destination: Destination | null } | null>(null);
+  const session = useRef<Session<T> | null>(null);
   const frame = useRef(0);
 
-  function targetAt(active: Session) {
+  function targetAt(active: Session<T>) {
     const row = document.elementFromPoint(active.x, active.y)?.closest<HTMLElement>('[data-reorder-item]');
     const id = row?.dataset.reorderItem;
     if (!row || row.dataset.reorderGroup !== active.source.group || !id || id === active.source.id) return null;
@@ -27,7 +28,7 @@ export function useItemDrag(drop: (source: Source, destination: Destination) => 
     return { id, after: active.y >= (rect.top + rect.bottom) / 2 };
   }
 
-  function refresh(active: Session) {
+  function refresh(active: Session<T>) {
     const destination = targetAt(active);
     if (active.destination?.id === destination?.id && active.destination?.after === destination?.after) return;
     active.destination = destination;
@@ -37,10 +38,13 @@ export function useItemDrag(drop: (source: Source, destination: Destination) => 
   function scroll() {
     const active = session.current;
     if (!active?.active) return;
-    const footer = document.querySelector('.bottom-nav')?.getBoundingClientRect();
-    const bottom = footer?.height ? footer.top : window.innerHeight;
-    const speed = active.y < 56 ? -10 : active.y > bottom - 56 ? 10 : 0;
-    if (speed) { window.scrollBy(0, speed); refresh(active); }
+    const bounds = active.scrollArea?.getBoundingClientRect();
+    const footer = bounds ? null : document.querySelector('.bottom-nav')?.getBoundingClientRect();
+    const top = bounds?.top ?? 0;
+    const bottom = bounds?.bottom ?? (footer?.height ? footer.top : window.innerHeight);
+    const edge = Math.min(56, (bottom - top) / 4);
+    const speed = active.y < top + edge ? -10 : active.y > bottom - edge ? 10 : 0;
+    if (speed) { (active.scrollArea || window).scrollBy(0, speed); refresh(active); }
     frame.current = requestAnimationFrame(scroll);
   }
 
@@ -57,12 +61,13 @@ export function useItemDrag(drop: (source: Source, destination: Destination) => 
   return {
     preview,
     cancel,
-    start(event: PointerEvent<HTMLElement>, source: Source) {
+    start(event: PointerEvent<HTMLElement>, source: Source<T>) {
       if (event.button !== 0 || session.current || source.itemIds.length < 2) return;
-      event.preventDefault();
+      if (event.pointerType !== 'touch') event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
       session.current = {
-        source, handle: event.currentTarget, pointerId: event.pointerId, active: false,
+        source, handle: event.currentTarget, scrollArea: event.currentTarget.closest<HTMLElement>('[data-drag-scroll]'),
+        pointerId: event.pointerId, active: false,
         startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, destination: null,
       };
     },

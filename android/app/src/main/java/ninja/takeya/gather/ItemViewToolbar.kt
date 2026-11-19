@@ -24,6 +24,7 @@ internal fun ItemViewToolbar(
     openView: () -> Unit,
     startSelection: () -> Unit,
     finishMode: () -> Unit,
+    openGroupOrder: (() -> Unit)?,
     openBulk: (Boolean) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -38,6 +39,13 @@ internal fun ItemViewToolbar(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (openGroupOrder != null) {
+                    TextButton(onClick = openGroupOrder, enabled = writable) {
+                        Icon(Icons.Outlined.SwapVert, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Reorder groups")
+                    }
+                }
             }
             selectedCount != null -> {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {

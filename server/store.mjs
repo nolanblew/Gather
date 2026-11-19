@@ -3,7 +3,7 @@ import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { InputError, bool, fail, id, object, string } from './input.mjs';
-import { WORKSPACE_VERSION, bulkAdd, editAssignments, editDictionary, guardOrder, mapContentIds, orderToken, readItemOrganization, readOrganization, remapListContent } from './organization.mjs';
+import { WORKSPACE_VERSION, reorderGroups, bulkAdd, editAssignments, editDictionary, guardOrder, mapContentIds, orderToken, readItemOrganization, readOrganization, remapListContent } from './organization.mjs';
 import { seedWorkspace } from './seed.mjs';
 
 export { InputError, WORKSPACE_VERSION };
@@ -153,6 +153,7 @@ export function applyAction(workspace, action) {
     l.items.push(i);
     receipt = { createdItemId: i.id };
   }
+  else if (type === 'group.reorder') reorderGroups(l, p);
   else if (type === 'item.bulkAdd') bulkAdd(l, p, selectedItems(l, p.itemIds));
   else if (type === 'item.reorderVisible') reorderVisible(l, p);
   else if (type.startsWith('item.')) {

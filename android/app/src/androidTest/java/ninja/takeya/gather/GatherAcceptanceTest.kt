@@ -788,6 +788,61 @@ class GatherAcceptanceTest {
         }
     }
 
+    @Test fun reorderGroupsByArrowAndTouchWithAFilterActive() {
+        val fixture = LocalAcceptanceFixture()
+        signIn(fixture)
+        val title = "Group order ${fixture.runId}"
+        val listId = fixture.action("list.create", json("title" to title)).getString("createdListId")
+        val names = listOf("Alex", "Maya", "Sam")
+        names.forEach { name ->
+            fixture.action("item.createWithPeople", json(
+                "listId" to listId,
+                "text" to "Gift for $name",
+                "newRecipients" to org.json.JSONArray().put(json("name" to name)),
+            ))
+        }
+        val people = checkNotNull(fixture.list(title)).getJSONArray("recipients")
+        val personKeys = (0 until people.length()).map { people.getJSONObject(it) }
+            .associate { it.getString("name") to "person:${it.getString("id")}" }
+        val model = viewModel()
+        compose.runOnIdle { model.refresh() }
+        compose.waitUntil(20_000) { model.state.value.workspace.lists.any { it.id == listId } }
+        compose.runOnIdle { model.select(listId) }
+        waitTag("page-detail:$listId")
+        scrollText("View")
+        click("View")
+        click("Person")
+        click("All people")
+        click("Alex")
+        click("Apply")
+        waitText("Grouped by person · 1 item")
+        compose.onAllNodesWithText("Reorder groups").assertCountEquals(0)
+
+        scrollDescription("List options")
+        clickDescription("List options")
+        click("Edit order")
+        scrollText("Reorder groups")
+        click("Reorder groups")
+        clickDescription("Move Maya up")
+        val arrowOrder = listOf("Maya", "Alex", "Sam").map(personKeys::getValue)
+        compose.waitUntil(20_000) { model.state.value.selected?.personGroupOrder == arrowOrder }
+
+        val samHandle = compose.onNodeWithContentDescription("Drag Sam")
+        val center = samHandle.fetchSemanticsNode().boundsInRoot.center
+        val mayaCenter = compose.onNodeWithContentDescription("Drag Maya").fetchSemanticsNode().boundsInRoot.center
+        samHandle.performTouchInput {
+            swipe(this.center, this.center + Offset(0f, mayaCenter.y - center.y), durationMillis = 500)
+        }
+        val draggedOrder = listOf("Sam", "Maya", "Alex").map(personKeys::getValue)
+        compose.waitUntil(20_000) { model.state.value.selected?.personGroupOrder == draggedOrder }
+        awaitStored("persisted group order including filtered groups") {
+            fixture.list(title)?.optJSONArray("personGroupOrder")?.toString() == org.json.JSONArray(draggedOrder).toString()
+        }
+        click("Reset order")
+        compose.waitUntil(20_000) { model.state.value.selected?.personGroupOrder == emptyList<String>() }
+        awaitStored("restored default group order") { fixture.list(title)?.has("personGroupOrder") == false }
+    }
+
     @Test fun organizationKeepsPlainCaptureAndFiltersCanonicalNumberedItems() {
         val fixture = LocalAcceptanceFixture()
         signIn(fixture)

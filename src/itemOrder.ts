@@ -45,6 +45,17 @@ export function splitItemGroups(items: Item[], groupBy: ItemGrouping) {
   return Array.from(byGroup, ([id, groupedItems]) => ({ id, items: groupedItems }));
 }
 
+export function sortItemGroupIds(groupIds: readonly string[], preferred: readonly string[], label: (id: string) => string) {
+  const positions = new Map(preferred.map((id, index) => [id, index]));
+  const specialRank = (id: string) => id === 'unassigned' ? 2 : id === 'anywhere' ? 1 : 0;
+  return groupIds.slice().sort((left, right) =>
+    (positions.get(left) ?? preferred.length) - (positions.get(right) ?? preferred.length)
+    || specialRank(left) - specialRank(right)
+    || label(left).localeCompare(label(right))
+    || left.localeCompare(right)
+  );
+}
+
 export function reorderItemIds(itemIds: readonly string[], sourceId: string, targetId: string, after: boolean): string[] | null {
   if (sourceId === targetId || !itemIds.includes(sourceId) || !itemIds.includes(targetId)) return null;
   const reordered = itemIds.filter(id => id !== sourceId);

@@ -56,6 +56,8 @@ data class GatherList(
     val places: List<Place> = emptyList(),
     val recipients: List<Recipient> = emptyList(),
     val orderToken: String? = null,
+    val personGroupOrder: List<String> = emptyList(),
+    val placeGroupOrder: List<String> = emptyList(),
 ) {
     val owner
         get() = role == "owner"
