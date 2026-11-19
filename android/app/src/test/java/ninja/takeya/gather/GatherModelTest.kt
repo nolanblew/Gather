@@ -253,4 +253,36 @@ class GatherModelTest {
         assertEquals(Availability(), list.items.last().availability)
         assertNull(list.items.last().recipientId)
     }
+
+    @Test
+    fun nativeReadsMultiplePeopleAndFiltersAnyMembership() {
+        val json = Json { ignoreUnknownKeys = true }
+        val workspace = json.decodeFromString<Workspace>(
+            """{"version":4,"lists":[{"id":"trip","title":"Trip","items":[{"id":"shared","text":"Gift","recipientIds":["alex","maya"]},{"id":"legacy","text":"Tea","recipientId":"maya"},{"id":"unset","text":"Paper"}]}]}"""
+        )
+        val items = workspace.lists.single().items
+        assertEquals(listOf("alex", "maya"), items[0].peopleIds)
+        assertEquals(listOf("maya"), items[1].peopleIds)
+        assertEquals(listOf("shared"), items.filter(ListFilter(person = "alex")::matches).map { it.id })
+        assertEquals(listOf("shared", "legacy"), items.filter(ListFilter(person = "maya")::matches).map { it.id })
+        assertEquals(listOf("unset"), items.filter(ListFilter(person = FILTER_UNSET)::matches).map { it.id })
+    }
+
+    @Test
+    fun groupedRowsKeepOneUnderlyingIdentityAndDateAddedIgnoresManualMoves() {
+        val shared = ListItem("shared", "Gift", position = 2, recipientIds = listOf("maya", "alex"))
+        val other = ListItem("other", "Tea", position = 0)
+        val list = GatherList(
+            "list", "List", recipients = listOf(Recipient("maya", "Maya"), Recipient("alex", "Alex")),
+            items = listOf(shared, other),
+        )
+        assertEquals(listOf("shared", "other"), list.viewItems(ItemSort.DateAdded, ListFilter()).map { it.id })
+        assertEquals(listOf("other", "shared"), list.viewItems(ItemSort.Manual, ListFilter()).map { it.id })
+        val groups = list.viewGroups(list.items, ItemGrouping.Person)
+        assertEquals(listOf("Alex", "Maya", "No recipient"), groups.map { it.title })
+        assertEquals("shared", groups[0].rows.single().item.id)
+        assertEquals("shared", groups[1].rows.single().item.id)
+        assertEquals(listOf("Maya"), groups[0].rows.single().alsoUnder)
+        assertEquals(listOf("other", "shared"), movedItemIds(listOf("shared", "other"), "shared", "other"))
+    }
 }

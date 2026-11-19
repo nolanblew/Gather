@@ -32,6 +32,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -45,6 +46,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.layout.FoldingFeature
 import java.time.LocalDate
@@ -66,7 +68,9 @@ sealed interface Editor {
 
     data class SectionForm(val list: GatherList, val section: Section? = null) : Editor
 
-    data class Filters(val list: GatherList, val filter: ListFilter) : Editor
+    data class Filters(val list: GatherList, val filter: ListFilter, val view: Boolean = false) : Editor
+
+    data class BulkAdd(val list: GatherList, val itemIds: Set<String>, val places: Boolean) : Editor
 
     data class Definitions(val list: GatherList) : Editor
 
@@ -102,10 +106,15 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                 confirm == null &&
                 (state.selectedId != null || settings)
     ) {
-        if (state.selectedId != null) model.select(null)
-        else {
-            settings = false
-            model.collection("library")
+        val listId = state.selectedId
+        when {
+            listId != null && model.ui.reorderListId == listId -> model.ui.reorderListId = null
+            listId != null && model.ui.itemSelections.containsKey(listId) -> model.ui.itemSelections.remove(listId)
+            listId != null -> model.select(null)
+            else -> {
+                settings = false
+                model.collection("library")
+            }
         }
     }
     var importing by remember { mutableStateOf<String?>(null) }
@@ -1021,6 +1030,14 @@ fun DetailScreen(
     val hiddenSaved = ui.hiddenSavedItems[list.id]
     val capture = ui.itemCapture[list.id].orEmpty()
     val organization = state.workspace.version >= 3
+    val itemViews = state.workspace.version >= 4
+    val selected = ui.itemSelections[list.id]
+    val reordering = ui.reorderListId == list.id
+    val showingCapture = !reordering && selected == null
+    val query = ui.itemQueries[list.id].orEmpty()
+    val narrowed = filter.active || query.isNotBlank()
+    val sort = if (reordering || !itemViews) ItemSort.Manual else model.itemSort(list)
+    val grouping = ui.itemGrouping[list.id] ?: ItemGrouping.None
     val canFilter =
         filter.active || list.usesPlaces || list.usesRecipients ||
             (list.kind == "checklist" && list.checkedCount > 0)
@@ -1030,17 +1047,43 @@ fun DetailScreen(
         if (list.numbered) canonical.mapIndexed { index, item -> item.id to index + 1 }.toMap()
         else emptyMap()
     }
-    val visibleItems = remember(canonical, filter) { canonical.filter(filter::matches) }
-    val groups = visibleItems.groupBy { it.sectionId }
-    val unsectioned = groups[null].orEmpty()
-    val sections = list.sections.sortedBy { it.position }.filter {
-        !filter.active || groups[it.id].orEmpty().isNotEmpty()
+    val visibleItems = remember(list, sort, filter, query) { list.viewItems(sort, filter, query) }
+    val entries = remember(list, visibleItems, grouping, narrowed, itemViews) {
+        list.detailEntries(visibleItems, grouping, narrowed, itemViews && list.separatesCompletedItems)
     }
+    val reorderRows = remember(entries) { entries.filterIsInstance<DetailEntry.Row>().associateBy { it.key } }
+    val drag = remember(list.id, scroll) { ItemDragState(scroll) }
+    val dragTarget by remember(drag) { derivedStateOf { drag.targetKey() } }
     val focusManager = LocalFocusManager.current
     val openFilter = { draft: ListFilter -> edit(Editor.Filters(list, draft)) }
     fun clearFilters() {
         ui.filters.remove(list.id)
+        ui.itemQueries.remove(list.id)
         ui.hiddenSavedItems.remove(list.id)
+    }
+    fun startReorder() {
+        focusManager.clearFocus()
+        ui.itemSelections.remove(list.id)
+        ui.reorderListId = list.id
+    }
+    fun finishMode() {
+        ui.itemSelections.remove(list.id)
+        if (reordering) ui.reorderListId = null
+    }
+    fun moveItem(from: DetailEntry.Row, destinationId: String, token: String?) {
+        if (!reordering || !writable || token == null) return
+        val ids = movedItemIds(from.bucket.itemIds, from.row.item.id, destinationId) ?: return
+        model.action(
+            "item.reorderVisible",
+            payload("listId" to list.id, "itemIds" to ids, "expectedOrderToken" to token),
+            onSuccess = { model.setItemSort(list.id, ItemSort.Manual) },
+        )
+    }
+    LaunchedEffect(list.items, selected) {
+        if (selected != null) {
+            val current = list.items.filter { it.id in selected }.mapTo(mutableSetOf()) { it.id }
+            if (current != selected) ui.itemSelections[list.id] = current
+        }
     }
     LaunchedEffect(list.places, list.recipients, list.kind, filter) {
         val removedPlace = filter.place?.takeIf { list.placeFilterLabel(it) == null }
@@ -1067,25 +1110,12 @@ fun DetailScreen(
         lastRecipients = list.recipients
     }
     val revealItem = ui.itemToReveal[list.id]
-    LaunchedEffect(revealItem, visibleItems, filter) {
-        if (revealItem == null || filter.active) return@LaunchedEffect
-        val target = visibleItems.find { it.id == revealItem }
-        if (target != null) {
-            var index = 2 + if (hiddenSaved == null) 0 else 1
-            if (target.sectionId == null) index += unsectioned.indexOf(target)
-            else {
-                index += unsectioned.size
-                for (section in sections) {
-                    index++
-                    val content = groups[section.id].orEmpty()
-                    if (section.id == target.sectionId) {
-                        index += content.indexOf(target)
-                        break
-                    }
-                    index += maxOf(content.size, 1)
-                }
-            }
-            scroll.scrollToItem(index)
+    LaunchedEffect(revealItem, entries, showingCapture) {
+        if (revealItem == null) return@LaunchedEffect
+        val target = entries.indexOfFirst { it is DetailEntry.Row && it.row.item.id == revealItem }
+        if (target >= 0) {
+            val leading = 1 + listOf(itemViews, filter.active, hiddenSaved != null, showingCapture).count { it }
+            scroll.scrollToItem(leading + target)
         }
         ui.itemToReveal.remove(list.id)
     }
@@ -1109,7 +1139,16 @@ fun DetailScreen(
             label = "Checklist progress",
         )
     LazyColumn(
-        Modifier.widthIn(max = 840.dp).fillMaxSize(),
+        Modifier.widthIn(max = 840.dp).fillMaxSize()
+            .itemDragInput(drag, scroll, reordering && writable, list.orderToken) { source, target, token ->
+                val from = reorderRows[source.key]
+                val to = reorderRows[target]
+                if (from != null && to != null && from.bucketKey == to.bucketKey && from.bucket.itemIds == source.bucket.itemIds) {
+                    moveItem(from, to.row.item.id, token)
+                } else {
+                    model.report("This group changed. Review the latest list and try again.")
+                }
+            },
         state = scroll,
         contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 4.dp, bottom = 30.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -1192,7 +1231,16 @@ fun DetailScreen(
                                             openFilter(filter)
                                         },
                                     )
-                                if (filter.active && list.items.isNotEmpty())
+                                if (itemViews && visibleItems.size > 1 && !reordering)
+                                    DropdownMenuItem(
+                                        text = { Text("Edit order") },
+                                        onClick = {
+                                            more = false
+                                            startReorder()
+                                        },
+                                        enabled = writable,
+                                    )
+                                else if (!itemViews && filter.active && list.items.isNotEmpty())
                                     DropdownMenuItem(
                                         text = { Text("Edit order") },
                                         onClick = {
@@ -1436,6 +1484,30 @@ fun DetailScreen(
                 }
             }
         }
+        if (itemViews)
+            item(key = "item-view") {
+                ItemViewToolbar(
+                    query = query,
+                    onQuery = { ui.itemQueries[list.id] = it },
+                    visibleCount = visibleItems.size,
+                    selectedCount = selected?.size,
+                    reordering = reordering,
+                    grouping = grouping,
+                    writable = writable,
+                    openView = {
+                        focusManager.clearFocus()
+                        edit(Editor.Filters(list, filter, view = true))
+                    },
+                    startSelection = {
+                        focusManager.clearFocus()
+                        ui.itemSelections[list.id] = emptySet()
+                    },
+                    finishMode = ::finishMode,
+                    openBulk = { places ->
+                        if (!selected.isNullOrEmpty()) edit(Editor.BulkAdd(list, selected, places))
+                    },
+                )
+            }
         if (filter.active)
             item(key = "active-filters") {
                 Column {
@@ -1464,7 +1536,7 @@ fun DetailScreen(
                     }) { Text("View item") }
                 }
             }
-        item(key = "capture-item") {
+        if (showingCapture) item(key = "capture-item") {
             Row(
                 Modifier.fillMaxWidth().padding(top = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1490,7 +1562,7 @@ fun DetailScreen(
                 }
             }
         }
-        if (filter.active && visibleItems.isEmpty())
+        if (narrowed && visibleItems.isEmpty())
             item {
                 Text("No items match these filters.", Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
                 TextButton(onClick = ::clearFilters) { Text("Clear filters") }
@@ -1499,104 +1571,102 @@ fun DetailScreen(
             item {
                 Text("Add your first item.", Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
             }
-        items(unsectioned, key = { it.id }) { item ->
-            ItemRow(
-                list,
-                item,
-                writable,
-                {
-                    if (list.kind == "checklist")
-                        model.action(
-                            "item.update",
-                            payload(
-                                "listId" to list.id,
-                                "itemId" to item.id,
-                                "checked" to !item.checked,
-                            ),
-                        )
-                },
-                { edit(Editor.ItemForm(list, item)) },
-                ordinal = ordinals[item.id],
-                description = item.note.takeIf { showDetails }.orEmpty(),
-                detail = if (showDetails) list.itemMetadata(item, filter) else "",
-                modifier =
-                    Modifier.animateItem(
-                        fadeInSpec = GatherMotion.quick(),
-                        placementSpec = GatherMotion.standard(),
-                        fadeOutSpec = GatherMotion.quick(),
-                    ),
+        items(entries, key = { it.key }, contentType = { it::class }) { entry ->
+            val placement = Modifier.animateItem(
+                fadeInSpec = GatherMotion.quick(),
+                placementSpec = GatherMotion.standard(),
+                fadeOutSpec = GatherMotion.quick(),
             )
-        }
-        sections.forEach { section ->
-                item(key = "section-${section.id}") {
+            when (entry) {
+                DetailEntry.Completed -> Text(
+                    "Done",
+                    Modifier.padding(top = 14.dp).semantics { heading() },
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                is DetailEntry.SectionHeading -> {
+                    val section = entry.section
                     Row(
-                        Modifier.animateItem(
-                                fadeInSpec = GatherMotion.quick(),
-                                placementSpec = GatherMotion.standard(),
-                                fadeOutSpec = GatherMotion.quick(),
-                            )
-                            .fillMaxWidth()
-                            .padding(top = 18.dp),
+                        placement.fillMaxWidth().padding(top = 18.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            section.title,
+                            section?.title ?: "Unsectioned",
                             style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.weight(1f).semantics { heading() },
                         )
-                        IconButton(
-                            onClick = { edit(Editor.ItemForm(list, sectionId = section.id, filter = filter)) },
-                            enabled = writable,
-                        ) {
-                            Icon(Icons.Outlined.Add, "Add item to ${section.title}")
-                        }
-                        if (!filter.active) IconButton(
-                            onClick = { edit(Editor.SectionForm(list, section)) },
-                            enabled = writable,
-                        ) {
-                            Icon(Icons.Outlined.MoreHoriz, "Edit section ${section.title}")
+                        if (section != null && !entry.done && showingCapture) {
+                            IconButton(
+                                onClick = { edit(Editor.ItemForm(list, sectionId = section.id, filter = filter)) },
+                                enabled = writable,
+                            ) { Icon(Icons.Outlined.Add, "Add item to ${section.title}") }
+                            if (!filter.active) IconButton(
+                                onClick = { edit(Editor.SectionForm(list, section)) },
+                                enabled = writable,
+                            ) { Icon(Icons.Outlined.MoreHoriz, "Edit section ${section.title}") }
                         }
                     }
                 }
-                val sectionItems = groups[section.id].orEmpty()
-                items(sectionItems, key = { it.id }) { item ->
+                is DetailEntry.GroupHeading -> Text(
+                    entry.title,
+                    placement.padding(top = 6.dp).semantics { heading() },
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                is DetailEntry.EmptySection -> Text(
+                    "No items in this section",
+                    Modifier.padding(vertical = 8.dp, horizontal = 12.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                is DetailEntry.Row -> {
+                    val item = entry.row.item
+                    val rowSelected = selected?.contains(item.id)
+                    val toggle = {
+                        val current = ui.itemSelections[list.id]
+                        if (current != null) {
+                            ui.itemSelections[list.id] = if (item.id in current) current - item.id else current + item.id
+                        } else if (list.kind == "checklist") {
+                            model.action("item.update", payload("listId" to list.id, "itemId" to item.id, "checked" to !item.checked))
+                        }
+                        Unit
+                    }
+                    val index = entry.bucket.itemIds.indexOf(item.id)
+                    val moveUp = entry.bucket.itemIds.getOrNull(index - 1)?.let { id ->
+                        { moveItem(entry, id, list.orderToken) }
+                    }
+                    val moveDown = entry.bucket.itemIds.getOrNull(index + 1)?.let { id ->
+                        { moveItem(entry, id, list.orderToken) }
+                    }
+                    val animatingDrag = drag.activeKey == entry.key
+                    val moveTarget = reordering && dragTarget == entry.key
                     ItemRow(
                         list,
                         item,
                         writable,
-                        {
-                            if (list.kind == "checklist")
-                                model.action(
-                                    "item.update",
-                                    payload(
-                                        "listId" to list.id,
-                                        "itemId" to item.id,
-                                        "checked" to !item.checked,
-                                    ),
-                                )
-                        },
-                        { edit(Editor.ItemForm(list, item)) },
+                        toggle,
+                        { if (rowSelected == null) edit(Editor.ItemForm(list, item)) else toggle() },
                         ordinal = ordinals[item.id],
                         description = item.note.takeIf { showDetails }.orEmpty(),
-                        detail = if (showDetails) list.itemMetadata(item, filter) else "",
-                        modifier =
-                            Modifier.animateItem(
-                                fadeInSpec = GatherMotion.quick(),
-                                placementSpec = GatherMotion.standard(),
-                                fadeOutSpec = GatherMotion.quick(),
-                            ),
+                        detail = if (showDetails) list.itemMetadata(item, filter, grouping) else "",
+                        alias = entry.row.aliasSummary,
+                        selected = rowSelected,
+                        highlighted = animatingDrag || moveTarget,
+                        dragHandle = if (!reordering) null else {
+                            { ItemDragHandle(entry, drag, writable && entry.bucket.itemIds.size > 1) }
+                        },
+                        reorderMenu = if (!reordering) null else {
+                            { ItemReorderMenu(item.text, writable && list.orderToken != null, moveUp, moveDown) }
+                        },
+                        modifier = placement.then(
+                            if (animatingDrag) Modifier.zIndex(1f).graphicsLayer {
+                                translationY = drag.translation(entry.key)
+                                shadowElevation = 5.dp.toPx()
+                                shape = RoundedCornerShape(18.dp)
+                            } else Modifier,
+                        ),
                     )
                 }
-                if (sectionItems.isEmpty())
-                    item(key = "empty-${section.id}") {
-                        Text(
-                            "No items in this section",
-                            Modifier.padding(vertical = 8.dp, horizontal = 12.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
             }
+        }
         if (list.repeatCadence != "manual")
             item {
                 Text(
@@ -1638,6 +1708,11 @@ fun ItemRow(
     ordinal: Int?,
     description: String,
     detail: String,
+    alias: String? = null,
+    selected: Boolean? = null,
+    highlighted: Boolean = false,
+    dragHandle: (@Composable () -> Unit)? = null,
+    reorderMenu: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val textColor by
@@ -1648,26 +1723,32 @@ fun ItemRow(
             label = "Item completion",
         )
     Surface(
-        onClick = edit,
         shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        color = if (selected == true) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, if (highlighted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
         modifier = modifier.fillMaxWidth(),
     ) {
+        val editAction = if (reorderMenu == null) Modifier.clickable(enabled = selected == null || enabled, onClick = edit)
+            else Modifier
         Row(
-            Modifier.padding(start = 5.dp, end = 10.dp, top = 8.dp, bottom = 8.dp)
+            editAction.padding(start = 5.dp, end = 10.dp, top = 8.dp, bottom = 8.dp)
                 .heightIn(min = 54.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (list.kind == "checklist")
+            if (dragHandle != null) dragHandle()
+            else if (list.kind == "checklist" || selected != null)
                 Checkbox(
-                    checked = item.checked,
+                    checked = selected ?: item.checked,
                     onCheckedChange = { toggle() },
                     enabled = enabled,
                     modifier =
                         Modifier.semantics {
-                            contentDescription =
-                                "${if(item.checked)"Uncheck" else "Check"} ${item.text}"
+                            val action = when (selected) {
+                                true -> "Deselect"
+                                false -> "Select"
+                                null -> if (item.checked) "Uncheck" else "Check"
+                            }
+                            contentDescription = "$action ${item.text}"
                         },
                 )
             else if (ordinal == null)
@@ -1704,13 +1785,24 @@ fun ItemRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 4.dp),
                     )
+                if (alias != null)
+                    Text(
+                        alias,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
             }
-            Icon(
-                Icons.Outlined.ChevronRight,
-                "Edit ${item.text}",
-                Modifier.size(20.dp).padding(start = 4.dp),
-                tint = MaterialTheme.colorScheme.outline,
-            )
+            if (reorderMenu != null) reorderMenu()
+            else if (selected == null)
+                Icon(
+                    Icons.Outlined.ChevronRight,
+                    "Edit ${item.text}",
+                    Modifier.size(20.dp).padding(start = 4.dp),
+                    tint = MaterialTheme.colorScheme.outline,
+                )
         }
     }
 }

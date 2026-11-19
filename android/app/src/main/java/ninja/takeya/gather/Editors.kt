@@ -82,6 +82,7 @@ fun EditorSheet(
                         is Editor.ListForm -> ListForm(editor.list, state, model, dismiss)
                         is Editor.ItemForm -> ItemForm(editor, state, model, dismiss, onConfirm)
                         is Editor.Filters -> FilterForm(editor, state, model, dismiss)
+                        is Editor.BulkAdd -> BulkAddForm(editor, state, model, dismiss)
                         is Editor.Definitions -> DefinitionsForm(editor, state, model, dismiss, onConfirm)
                         is Editor.SectionForm ->
                             SectionForm(editor, state, model, dismiss, onConfirm)

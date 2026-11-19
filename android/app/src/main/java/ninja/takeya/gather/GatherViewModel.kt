@@ -1,6 +1,7 @@
 package ninja.takeya.gather
 
 import android.app.Application
+import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
@@ -59,6 +60,7 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     private val api = GatherApi()
     private val vault = TokenVault(application)
     private val preferences = application.getSharedPreferences("appearance", 0)
+    private val itemViewPreferences = application.getSharedPreferences("item-view", 0)
     private val mutable =
         MutableStateFlow(
             GatherState(appearance = preferences.getString("theme", "system") ?: "system")
@@ -254,7 +256,27 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
             state.value.error != null
 
     fun select(id: String?) {
+        val previous = state.value.selectedId
+        if (previous != null && previous != id) {
+            ui.itemSelections.remove(previous)
+            if (ui.reorderListId == previous) ui.reorderListId = null
+        }
         mutable.update { it.copy(selectedId = id, sharing = null) }
+    }
+
+    private fun itemSortKey(listId: String): String? = state.value.username?.let { username ->
+        java.util.UUID.nameUUIDFromBytes(payload("account" to username, "listId" to listId).toString().toByteArray()).toString()
+    }
+
+    fun itemSort(list: GatherList): ItemSort {
+        ui.itemSorts[list.id]?.let { return it }
+        val stored = itemSortKey(list.id)?.let { itemViewPreferences.getString(it, null) }
+        return ItemSort.entries.firstOrNull { it.name == stored } ?: list.defaultItemSort()
+    }
+
+    fun setItemSort(listId: String, sort: ItemSort) {
+        itemSortKey(listId)?.let { key -> itemViewPreferences.edit { putString(key, sort.name) } }
+        ui.itemSorts[listId] = sort
     }
 
     fun collection(scope: String) {
@@ -366,8 +388,11 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     fun showSavedItem(listId: String, existingId: String?) {
         val snapshot = state.value.workspace
         val itemId = existingId ?: snapshot.createdItemId ?: return
-        val item = snapshot.lists.find { it.id == listId }?.items?.find { it.id == itemId } ?: return
-        if (ui.filters[listId]?.matches(item) == false) ui.hiddenSavedItems[listId] = itemId
+        val list = snapshot.lists.find { it.id == listId } ?: return
+        val item = list.items.find { it.id == itemId } ?: return
+        if (ui.filters[listId]?.matches(item) == false || !list.matchesItemQuery(item, ui.itemQueries[listId].orEmpty())) {
+            ui.hiddenSavedItems[listId] = itemId
+        }
     }
 
     fun loadSharing(listId: String) =

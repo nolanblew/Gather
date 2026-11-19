@@ -44,8 +44,8 @@ data class ListFilter(
             } &&
             when (person) {
                 null -> true
-                FILTER_UNSET -> item.recipientId == null
-                else -> item.recipientId == person
+                FILTER_UNSET -> item.peopleIds.isEmpty()
+                else -> person in item.peopleIds
             }
 
     fun summary(list: GatherList): String =
@@ -81,7 +81,7 @@ val GatherList.usesPlaces: Boolean
     get() = items.any { it.availability.mode != "unassigned" }
 
 val GatherList.usesRecipients: Boolean
-    get() = items.any { it.recipientId != null }
+    get() = items.any { it.peopleIds.isNotEmpty() }
 
 val GatherList.hasItemDetails: Boolean
     get() = usesPlaces || usesRecipients || items.any { it.note.isNotBlank() || it.quantity.isNotBlank() }
@@ -93,15 +93,21 @@ fun GatherList.orderedPayload(vararg values: Pair<String, Any?>): JsonObject =
     if (!numbered || orderToken == null) payload("listId" to id, *values)
     else payload("listId" to id, "expectedOrderToken" to orderToken, *values)
 
-fun GatherList.itemMetadata(item: ListItem, filter: ListFilter): String =
-    listOfNotNull(
-            item.quantity.takeIf { it.isNotBlank() },
-            item.recipientId?.takeIf { it != filter.person }?.let { id ->
-                recipients.find { it.id == id }?.name?.let { "For $it" }
-            },
-            placePreview(item.availability, filter.place),
-        )
-        .joinToString(" · ")
+fun GatherList.itemMetadata(
+    item: ListItem,
+    filter: ListFilter,
+    grouping: ItemGrouping = ItemGrouping.None,
+): String {
+    val people = if (grouping == ItemGrouping.Person) emptyList() else {
+        val assigned = item.peopleIds.toSet() - filter.person
+        recipients.filter { it.id in assigned }.map { it.name }
+    }
+    return listOfNotNull(
+        item.quantity.takeIf { it.isNotBlank() },
+        people.takeIf { it.isNotEmpty() }?.joinToString(", ", prefix = "For "),
+        placePreview(item.availability, filter.place).takeUnless { grouping == ItemGrouping.Place },
+    ).joinToString(" · ")
+}
 
 private fun GatherList.placePreview(availability: Availability, selectedPlace: String?): String? {
     if (availability.mode == "anywhere") return "Anywhere"
@@ -125,6 +131,25 @@ fun GatherList.itemWritePayload(
     newRecipient: String?,
     expectedAvailability: Availability,
     expectedRecipientId: String?,
+): JsonObject = itemWritePayload(
+    item, text, description, quantity, sectionId, availability,
+    listOfNotNull(recipientId), newPlaces, listOfNotNull(newRecipient),
+    expectedAvailability, listOfNotNull(expectedRecipientId), multiplePeople = false,
+)
+
+fun GatherList.itemWritePayload(
+    item: ListItem?,
+    text: String,
+    description: String,
+    quantity: String,
+    sectionId: String?,
+    availability: Availability,
+    recipientIds: List<String>,
+    newPlaces: List<String>,
+    newRecipients: List<String>,
+    expectedAvailability: Availability,
+    expectedRecipientIds: List<String>,
+    multiplePeople: Boolean,
 ): JsonObject {
     val values = mutableListOf<Pair<String, Any?>>()
     if (item != null) values += "itemId" to item.id
@@ -137,10 +162,16 @@ fun GatherList.itemWritePayload(
         if (item != null) values += "expectedAvailability" to expectedAvailability.toPayload()
         if (newPlaces.isNotEmpty()) values += "newPlaces" to newPlaces.map { payload("name" to it) }
     }
-    if (recipientId != expectedRecipientId || newRecipient != null) {
-        if (newRecipient == null) values += "recipientId" to recipientId
-        else values += "newRecipient" to payload("name" to newRecipient)
-        if (item != null) values += "expectedRecipientId" to expectedRecipientId
+    if (recipientIds.toSet() != expectedRecipientIds.toSet() || newRecipients.isNotEmpty()) {
+        if (multiplePeople) {
+            values += "recipientIds" to recipientIds
+            if (newRecipients.isNotEmpty()) values += "newRecipients" to newRecipients.map { payload("name" to it) }
+            if (item != null) values += "expectedRecipientIds" to expectedRecipientIds
+        } else {
+            if (newRecipients.isEmpty()) values += "recipientId" to recipientIds.singleOrNull()
+            else values += "newRecipient" to payload("name" to newRecipients.single())
+            if (item != null) values += "expectedRecipientId" to expectedRecipientIds.singleOrNull()
+        }
     }
     return if (item == null || sectionId != item.sectionId) orderedPayload(*values.toTypedArray())
     else payload("listId" to id, *values.toTypedArray())
@@ -174,7 +205,7 @@ fun GatherList.recipientAssignmentToken(recipient: Recipient): String =
         "recipient",
         recipient.id,
         payload("id" to recipient.id, "name" to recipient.name),
-        items.filter { it.recipientId == recipient.id }.sortedBy { it.id }.map {
+        items.filter { recipient.id in it.peopleIds }.sortedBy { it.id }.map {
             JsonArray(listOf(JsonPrimitive(it.id), JsonPrimitive(recipient.id)))
         },
     )

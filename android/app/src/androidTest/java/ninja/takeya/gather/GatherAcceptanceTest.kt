@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import androidx.lifecycle.ViewModelProvider
 import androidx.compose.ui.MotionDurationScale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.text.AnnotatedString
 import androidx.core.view.ViewCompat
@@ -736,6 +737,57 @@ class GatherAcceptanceTest {
         }
     }
 
+    @Test fun groupedSelectionBulkAddPreservesExistingPeople() {
+        val fixture = LocalAcceptanceFixture()
+        signIn(fixture)
+        val title = "Grouped bulk ${fixture.runId}"
+        val listId = fixture.action("list.create", json("title" to title)).getString("createdListId")
+        fixture.action("item.create", json(
+            "listId" to listId, "text" to "Shared gift",
+            "newRecipients" to org.json.JSONArray().put(json("name" to "Alex")).put(json("name" to "Maya")),
+        ))
+        val initial = checkNotNull(fixture.list(title))
+        val people = initial.getJSONArray("recipients")
+        val alexId = (0 until people.length()).map { people.getJSONObject(it) }.first { it.getString("name") == "Alex" }.getString("id")
+        val mayaId = (0 until people.length()).map { people.getJSONObject(it) }.first { it.getString("name") == "Maya" }.getString("id")
+        fixture.action("item.create", json("listId" to listId, "text" to "Other gift", "recipientId" to mayaId))
+        val model = viewModel()
+        compose.runOnIdle { model.refresh() }
+        compose.waitUntil(20_000) { model.state.value.workspace.lists.any { it.id == listId } }
+        compose.runOnIdle { model.select(listId) }
+        waitTag("page-detail:$listId")
+        scrollText("View")
+        click("View")
+        click("Person")
+        click("Apply")
+        scrollText("Grouped by person · 2 items")
+        click("Select items")
+        scrollText("Alex")
+        scrollDescription("Select Shared gift")
+        compose.onAllNodesWithContentDescription("Select Shared gift").onFirst().performClick()
+        scrollText("1 selected")
+        compose.onNodeWithText("1 selected").assertExists()
+        // Both appearances are projections of the same item, and therefore both are selected.
+        scrollText("Maya")
+        scrollDescription("Deselect Shared gift")
+        compose.onAllNodesWithContentDescription("Deselect Shared gift").onFirst().assertIsOn()
+        scrollDescription("Select Other gift")
+        clickDescription("Select Other gift")
+        scrollText("2 selected")
+        click("Add people")
+        click("Alex")
+        click("Add to 2 items")
+        awaitStored("add Alex without replacing Maya") {
+            val shared = fixture.item(title, "Shared gift") ?: return@awaitStored false
+            val other = fixture.item(title, "Other gift") ?: return@awaitStored false
+            fun ids(item: JSONObject): Set<String> {
+                val values = item.optJSONArray("recipientIds") ?: return setOfNotNull(item.optString("recipientId").takeIf { it.isNotBlank() })
+                return (0 until values.length()).map { values.getString(it) }.toSet()
+            }
+            ids(shared) == setOf(alexId, mayaId) && ids(other) == setOf(alexId, mayaId)
+        }
+    }
+
     @Test fun organizationKeepsPlainCaptureAndFiltersCanonicalNumberedItems() {
         val fixture = LocalAcceptanceFixture()
         signIn(fixture)
@@ -789,15 +841,17 @@ class GatherAcceptanceTest {
         click("For someone")
         editorText("field-Search people", "Maya")
         click("Create “Maya”")
+        editorText("field-Search people", "Alex")
+        click("Create “Alex”")
         click("Done")
         saveEditor()
         awaitStored("atomic places, person and description") {
             val list = fixture.list(title) ?: return@awaitStored false
             val item = fixture.item(title, "Tea") ?: return@awaitStored false
             list.getJSONArray("places").length() == 2 &&
-                list.getJSONArray("recipients").length() == 1 &&
+                list.getJSONArray("recipients").length() == 2 &&
                 item.getJSONObject("availability").getJSONArray("placeIds").length() == 2 &&
-                item.getString("recipientId") == list.getJSONArray("recipients").getJSONObject(0).getString("id") &&
+                item.getJSONArray("recipientIds").length() == 2 &&
                 item.getString("note") == description
         }
         scrollText("1. Tea")
@@ -808,7 +862,8 @@ class GatherAcceptanceTest {
 
         val stored = checkNotNull(fixture.list(title))
         val listId = stored.getString("id")
-        val personId = stored.getJSONArray("recipients").getJSONObject(0).getString("id")
+        val people = stored.getJSONArray("recipients")
+        val personId = (0 until people.length()).map { people.getJSONObject(it) }.first { it.getString("name") == "Maya" }.getString("id")
         val mugId = checkNotNull(fixture.item(title, "Mug")).getString("id")
         fixture.action("item.update", json(
             "listId" to listId, "itemId" to mugId, "checked" to true,
@@ -846,17 +901,22 @@ class GatherAcceptanceTest {
         compose.onNodeWithText("1. Tea").assertIsDisplayed()
         captureOrganizationScreenshot("organization-filtered-list")
 
-        click("1. Tea")
-        click("Item actions")
+        click("Clear")
+        scrollDescription("List options")
+        clickDescription("List options")
         click("Edit order")
-        click("Show all items")
-        click("Move down")
-        awaitStored("move in full order") {
+        waitText("Manual order")
+        val teaHandle = compose.onNodeWithContentDescription("Drag Tea")
+        val teaCenter = teaHandle.fetchSemanticsNode().boundsInRoot.center
+        val paperCenter = compose.onNodeWithContentDescription("Drag Paper").fetchSemanticsNode().boundsInRoot.center
+        teaHandle.performTouchInput {
+            swipe(center, center + Offset(0f, paperCenter.y - teaCenter.y + 12f), durationMillis = 500)
+        }
+        awaitStored("drag in full order") {
             fixture.item(title, "Tea")?.optInt("position") == 1 &&
                 fixture.item(title, "Paper")?.optInt("position") == 0
         }
         click("Done")
-        click("Cancel")
         scrollText("2. Tea")
         compose.onNodeWithText("2. Tea").assertIsDisplayed()
 

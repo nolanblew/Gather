@@ -24,7 +24,11 @@ data class ListItem(
     val position: Int = 0,
     val availability: Availability = Availability(),
     val recipientId: String? = null,
-)
+    val recipientIds: List<String> = emptyList(),
+) {
+    val peopleIds: List<String>
+        get() = recipientIds.ifEmpty { listOfNotNull(recipientId) }
+}
 
 @Serializable
 data class GatherList(
