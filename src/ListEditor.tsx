@@ -154,6 +154,8 @@ export default function ListEditor({ list, category, icon, badges, organization,
     event.preventDefault();
     if (!draft.trim()) { setAddError('Enter an item.'); addRef.current?.focus(); return; }
     if (addSection && !selectedSection) { setAddError('This section is no longer available. Choose another section.'); return; }
+    if (busy) return;
+    addRef.current?.focus();
     const result = await mutate('item.create', {
       listId: list.id, text: draft, sectionId: selectedSection, ...orderGuard(list),
       ...(defaults.availability.mode !== 'unassigned' && { availability: defaults.availability }),
@@ -403,7 +405,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
       </div>}
     </div>
     {!mode && <div className="quick-add-wrap"><form className="quick-add" onSubmit={submit}>
-      <div className="quick-add-top"><Plus size={21} aria-hidden="true" /><input ref={addRef} aria-label="Add item" placeholder="Add item…" maxLength={500} disabled={busy} value={draft} onChange={event => { setDraft(event.target.value); setAddError(''); }} /><button className="primary" disabled={busy} type="submit">{busy ? 'Saving…' : 'Add'}</button></div>
+      <div className="quick-add-top"><Plus size={21} aria-hidden="true" /><input ref={addRef} aria-label="Add item" placeholder="Add item…" autoCapitalize="sentences" enterKeyHint="done" maxLength={500} aria-busy={busy} value={draft} onChange={event => { if (busy) return; setDraft(event.target.value); setAddError(''); }} /><button className="primary" onMouseDown={event => event.preventDefault()} disabled={busy} type="submit">{busy ? 'Saving…' : 'Add'}</button></div>
       {(orderedSections.length > 0 || addSection) && <label className="add-section-select"><span>Add to</span><select aria-label="Add item to section" value={addSection} onChange={event => { setAddSection(event.target.value); setAddError(''); }}><option value="">Unsectioned</option>{addSection && !selectedSection && <option value={addSection} disabled>Section removed</option>}{orderedSections.map(section => <option key={section.id} value={section.id}>{section.title}</option>)}</select></label>}
       {defaultLabels.length > 0 && <div className="quick-add-context"><span>{defaultLabels.join(' · ')}</span><button type="button" className="text-button" disabled={busy} onClick={() => {
         clearError(); setEditing({ item: makeItemDraft({ text: draft, sectionId: selectedSection, ...defaults }), fromQuickAdd: true });

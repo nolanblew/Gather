@@ -35,6 +35,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -1119,17 +1124,20 @@ fun DetailScreen(
         }
         ui.itemToReveal.remove(list.id)
     }
+    val captureFocus = remember(list.id) { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
     val addItem = {
         if (capture.isNotBlank() && writable) {
-            focusManager.clearFocus()
-            if (filter.place != null || filter.person != null) {
-                edit(Editor.ItemForm(list, initialText = capture, filter = filter))
-            } else {
-                model.action("item.create", list.orderedPayload("text" to capture.trim()), onSuccess = {
-                    ui.itemCapture.remove(list.id)
-                    model.showSavedItem(list.id, null)
-                })
-            }
+            captureFocus.requestFocus()
+            keyboard?.show()
+            val fields = mutableListOf<Pair<String, Any?>>("text" to capture.trim())
+            val availability = filter.draftAvailability()
+            if (availability.mode != "unassigned") fields += "availability" to availability.toPayload()
+            filter.person?.takeUnless { it == FILTER_UNSET }?.let { fields += "recipientId" to it }
+            model.action("item.create", list.orderedPayload(*fields.toTypedArray()), onSuccess = {
+                ui.itemCapture.remove(list.id)
+                model.showSavedItem(list.id, null)
+            })
         }
     }
     val progress by
@@ -1544,13 +1552,19 @@ fun DetailScreen(
             ) {
                 OutlinedTextField(
                     capture,
-                    { ui.itemCapture[list.id] = it.take(500) },
-                    modifier = Modifier.weight(1f).testTag("quick-item-text"),
+                    { if (writable) ui.itemCapture[list.id] = it.take(500) },
+                    modifier = Modifier.weight(1f).focusRequester(captureFocus).onPreviewKeyEvent { event ->
+                        if (event.key != Key.Enter && event.key != Key.NumPadEnter) false
+                        else {
+                            if (event.type == KeyEventType.KeyUp) addItem()
+                            true
+                        }
+                    }.testTag("quick-item-text"),
                     label = { Text("Add item") },
                     singleLine = true,
-                    enabled = writable,
+                    enabled = state.connected,
                     shape = RoundedCornerShape(16.dp),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { addItem() }),
                 )
                 Button(
