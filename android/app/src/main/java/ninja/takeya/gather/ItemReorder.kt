@@ -57,7 +57,7 @@ internal class ItemDragState(private val scroll: LazyListState) {
         val info = scroll.layoutInfo.visibleItemsInfo.find { it.key == entry.key } ?: return
         startOffset = downY.toInt() + scroll.layoutInfo.viewportStartOffset - info.center.toInt()
         pointerY = downY
-        eligibleKeys = entry.bucket.itemIds.mapTo(hashSetOf(), entry::siblingKey)
+        eligibleKeys = entry.bucket.rows.mapTo(hashSetOf(), entry::siblingKey)
         active = entry
     }
 

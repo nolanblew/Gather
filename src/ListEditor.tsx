@@ -1,3 +1,4 @@
+import AnimatedChecklist from './AnimatedChecklist';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { ArrowDown, ArrowLeft, ArrowUp, Check, ChevronDown, Copy, GripVertical, Link2, MapPin, MoreHorizontal, Plus, Search, SlidersHorizontal, SquareCheck, Star, UserRoundPlus, Users, X } from 'lucide-react';
 import { useAuth } from './auth';
@@ -222,12 +223,15 @@ export default function ListEditor({ list, category, icon, badges, organization,
     return recipients.get(id.slice(7))?.name || '';
   };
   const row = (item: Item, subgroup: string, bucket: string, itemIds: string[], index: number) => {
+    const memberships = subgroup ? itemGroupIds(item, groupBy) : [];
+    const appearance = subgroup === memberships[0] ? '' : subgroup;
+    const motion = { 'data-motion-item': item.id, 'data-motion-row': JSON.stringify([item.id, appearance]) };
     const ordinal = ordinals?.get(item.id);
     const personIds = itemRecipientIds(item);
     const names = personIds.filter(id => id !== activePerson).map(id => recipients.get(id)?.name).filter(Boolean);
     const personSummary = groupBy !== 'person' && names.length ? `${activePerson && personIds.includes(activePerson) ? 'Also for' : 'For'} ${names.join(', ')}` : '';
     const metadata = [item.quantity, personSummary, groupBy !== 'place' && placeSummary(item, places, activeFilters.place)].filter(Boolean).join(' · ');
-    const otherGroups = subgroup ? itemGroupIds(item, groupBy).filter(id => id !== subgroup).map(groupLabel).filter(Boolean) : [];
+    const otherGroups = memberships.filter(id => id !== subgroup).map(groupLabel).filter(Boolean);
     const alias = otherGroups.length > 0 && <span className="item-metadata item-alias">
       <Link2 size={15} aria-hidden="true" />
       <span>Also under {otherGroups[0]}{otherGroups.length > 1 && <>
@@ -243,7 +247,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
       preview?.source.id === item.id && 'item-lifted', dropTarget && (dropTarget.after ? 'drop-after' : 'drop-before'),
     ].filter(Boolean).join(' ');
     const contents = <><span className="item-text">{item.text}</span>{showDetails && metadata && <span className="item-metadata">{metadata}</span>}{alias}</>;
-    if (mode === 'select') return <label className={`${rowClass} item-selection`} key={item.id}>
+    if (mode === 'select') return <label {...motion} className={`${rowClass} item-selection`} key={item.id}>
       <span className="check-target">
         <input type="checkbox" aria-label={`Select ${item.text}${subgroup ? ` in ${groupLabel(subgroup)}` : ''}`} checked={selected} onChange={() => toggleSelection(item.id)} />
         <span className="checkbox-visual" aria-hidden="true">{selected && <Check size={15} />}</span>
@@ -251,7 +255,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
       {ordinal != null && <span className="item-ordinal" aria-hidden="true">{ordinal.toLocaleString()}.</span>}
       <span className="item-content">{contents}</span>
     </label>;
-    if (mode === 'reorder') return <div className={rowClass} key={item.id} data-reorder-group={bucket} data-reorder-item={item.id}>
+    if (mode === 'reorder') return <div {...motion} className={rowClass} key={item.id} data-reorder-group={bucket} data-reorder-item={item.id}>
       <span className={`item-grip${itemIds.length < 2 ? ' item-grip-inactive' : ''}`} aria-hidden="true"
         onPointerDown={event => {
           if (!busy && list.orderToken) drag.start(event, { group: bucket, id: item.id, itemIds, token: list.orderToken });
@@ -266,7 +270,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
         <button disabled={busy || index >= itemIds.length - 1} onClick={() => void saveReorder(itemIds, item.id, itemIds[index + 1], true)}><ArrowDown size={16} aria-hidden="true" />Move down</button>
       </ActionMenu>}
     </div>;
-    return <div className={rowClass} key={item.id}>
+    return <div {...motion} className={rowClass} key={item.id}>
       {isChecklist ? <label className="check-target">
         <input type="checkbox" checked={item.checked} disabled={busy} aria-label={`${item.checked ? 'Uncheck' : 'Complete'} ${item.text}`} onChange={() => void mutate('item.update', { listId: list.id, itemId: item.id, checked: !item.checked })} />
         <span className="checkbox-visual" aria-hidden="true">{item.checked && <Check size={15} />}</span>
@@ -374,7 +378,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
     {list.numbered && filtered && shown > 0 && shown < list.items.length && <p className="small-muted numbered-filter-help">Numbers follow the full list order.</p>}
     {filterMessage && <p className="filter-message" role="status">{filterMessage}</p>}
     {hiddenItemId && <div className="filtered-save" role="status">Item saved. It isn't shown with these filters. <button className="text-button" onClick={() => viewItem(hiddenItemId)}>View item</button></div>}
-    <div className="checklist">
+    <AnimatedChecklist items={list.items} count={list.items.length} view={JSON.stringify([sort, groupBy, filters, query, showDone])}>
       {!list.items.length && !filtered && <p className="editor-empty">Add your first item.</p>}
       {groups.map((group, index) => {
         const visible = group.items.filter(item => isVisible(item) && (!isChecklist || list.numbered || !item.checked));
@@ -403,7 +407,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
           </section>;
         }) : checked.map((item, index) => row(item, '', '', [], index)))}
       </div>}
-    </div>
+    </AnimatedChecklist>
     {!mode && <div className="quick-add-wrap"><form className="quick-add" onSubmit={submit}>
       <div className="quick-add-top"><Plus size={21} aria-hidden="true" /><input ref={addRef} aria-label="Add item" placeholder="Add item…" autoCapitalize="sentences" enterKeyHint="done" maxLength={500} aria-busy={busy} value={draft} onChange={event => { if (busy) return; setDraft(event.target.value); setAddError(''); }} /><button className="primary" onMouseDown={event => event.preventDefault()} disabled={busy} type="submit">{busy ? 'Saving…' : 'Add'}</button></div>
       {(orderedSections.length > 0 || addSection) && <label className="add-section-select"><span>Add to</span><select aria-label="Add item to section" value={addSection} onChange={event => { setAddSection(event.target.value); setAddError(''); }}><option value="">Unsectioned</option>{addSection && !selectedSection && <option value={addSection} disabled>Section removed</option>}{orderedSections.map(section => <option key={section.id} value={section.id}>{section.title}</option>)}</select></label>}

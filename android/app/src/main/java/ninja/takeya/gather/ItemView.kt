@@ -18,6 +18,8 @@ data class ItemViewRow(
     private val groupNames: List<String> = emptyList(),
     private val groupIndex: Int = -1,
 ) {
+    val isPrimaryAppearance get() = groupIndex <= 0
+
     val alsoUnder: List<String>
         get() = groupNames.filterIndexed { index, _ -> index != groupIndex }
 
@@ -113,8 +115,9 @@ internal sealed interface DetailEntry {
     }
 
     data class Row(val row: ItemViewRow, val bucket: ItemViewGroup, val bucketKey: String) : DetailEntry {
-        override val key = detailEntryKey("item", bucketKey, row.item.id)
-        fun siblingKey(itemId: String): String = detailEntryKey("item", bucketKey, itemId)
+        override val key = siblingKey(row)
+        fun siblingKey(sibling: ItemViewRow): String = if (sibling.isPrimaryAppearance)
+            detailEntryKey("primary-item", sibling.item.id) else detailEntryKey("item", bucketKey, sibling.item.id)
     }
 }
 
