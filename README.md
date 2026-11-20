@@ -4,6 +4,14 @@
 
 Gather is a responsive home for everyday lists, gift ideas, projects, and reusable trip checklists. The phone layout emphasizes quick capture and checking things off; desktop adds persistent navigation and a spacious library.
 
+## List covers
+
+The list opens with a photo and progress summary that collapse into a compact toolbar as you scroll. On large windows a side panel keeps list information and group navigation in reach. Open the list menu and choose **Change cover** to upload a photo. Owners and editors share the same cover.
+
+With a server-side `OPENAI_API_KEY`, Gather queues a cover for each newly created list. After a 30-second grace period it sends the current title and description to OpenAI’s Images API. Deleting the list, archiving it as its owner, or uploading a photo cancels pending generation. A copy inherits its source cover when available. Existing lists keep the built-in artwork until someone chooses a photo. The SQLite volume backup includes covers. Portable JSON backups contain list data only.
+
+Administrators can set `GATHER_COVER_GENERATION=false` to use uploads alone. `GATHER_COVER_MODEL` defaults to `gpt-image-2`. The service runs one generation at a time and defers queued work after `GATHER_COVER_DAILY_LIMIT` requests in a rolling 24 hours (default 50). API image charges apply.
+
 ## Optional organization
 
 Use **Add detail** to add a description, quantity, section, alternative places, or the people an item is for. **Select items** lets you add people or places to several items together. Places and people belong to the list.

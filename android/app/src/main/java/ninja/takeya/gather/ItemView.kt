@@ -138,7 +138,7 @@ internal sealed interface DetailEntry {
         override val key = detailEntryKey("empty-section", sectionId)
     }
 
-    data class GroupHeading(val title: String, val bucketKey: String) : DetailEntry {
+    data class GroupHeading(val title: String, val bucketKey: String, val groupId: String) : DetailEntry {
         override val key = detailEntryKey("group-heading", bucketKey)
     }
 
@@ -166,7 +166,7 @@ internal fun GatherList.detailEntries(
         fun addGroups(items: List<ListItem>, sectionId: String?, done: Boolean) {
             viewGroups(items, grouping).forEach { group ->
                 val bucketKey = detailEntryKey(sectionId.orEmpty(), done.toString(), group.id)
-                group.title?.let { add(DetailEntry.GroupHeading(it, bucketKey)) }
+                group.title?.let { add(DetailEntry.GroupHeading(it, bucketKey, group.id)) }
                 group.rows.forEach { row -> add(DetailEntry.Row(row, group, bucketKey)) }
             }
         }

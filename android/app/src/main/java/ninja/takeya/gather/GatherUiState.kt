@@ -29,6 +29,8 @@ class GatherUiState {
     val itemSorts = mutableStateMapOf<String, ItemSort>()
     val itemGrouping = mutableStateMapOf<String, ItemGrouping>()
     val itemQueries = mutableStateMapOf<String, String>()
+    var itemSearchListId by mutableStateOf<String?>(null)
+    var pendingCoverListId by mutableStateOf<String?>(null)
     val itemSelections = mutableStateMapOf<String, Set<String>>()
     var reorderListId by mutableStateOf<String?>(null)
     val hiddenDetails = mutableStateMapOf<String, Boolean>()
@@ -76,6 +78,8 @@ class GatherUiState {
         itemSorts.clear()
         itemGrouping.clear()
         itemQueries.clear()
+        itemSearchListId = null
+        pendingCoverListId = null
         itemSelections.clear()
         reorderListId = null
         hiddenDetails.clear()

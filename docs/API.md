@@ -47,9 +47,18 @@ Store the native token using Android Keystore-backed encrypted application-priva
 
 Native clients send JSON for POSTs and omit browser `Origin`, `Sec-Fetch-Site` and cookies. Native routes and bearer-authenticated reads enforce the same origin validation as writes: supplied cross-site origins/Fetch Metadata are rejected, and no cross-origin CORS access is enabled. Tokens are accepted only in Authorization headers, never query parameters or request bodies. TLS termination remains the responsibility of the deployment proxy.
 
-`GET /api/capabilities` is a public, non-cacheable compatibility probe returning `{ "apiVersion": 1, "workspaceVersion": 4, "authentication": ["cookie", "bearer"], "features": ["sharing", "search", "import", "export", "list-organization", "numbered-lists", "guarded-order", "multiple-recipients", "bulk-assignments", "visible-item-order", "group-order"] }`. `apiVersion` describes this HTTP contract independently of backup `version`. Native clients should verify bearer support before presenting sign-in against a configured server. Clients should also check feature support before offering organization controls or importing a backup from a newer workspace version.
+`GET /api/capabilities` is a public, non-cacheable compatibility probe returning `{ "apiVersion": 1, "workspaceVersion": 4, "authentication": ["cookie", "bearer"], "features": ["sharing", "search", "import", "export", "list-organization", "numbered-lists", "guarded-order", "multiple-recipients", "bulk-assignments", "visible-item-order", "group-order", "list-covers"] }`. `apiVersion` describes this HTTP contract independently of backup `version`. Native clients should verify bearer support before presenting sign-in against a configured server. Clients should also check feature support before offering organization controls or importing a backup from a newer workspace version.
 
-All URLs are same-origin. Errors have `{ "error": "Human-readable message" }`, an optional `code`, and a non-2xx status. Writes require JSON, are limited to 5 MiB, and reject cross-site origins. Auth, invitation and sharing bodies are limited to 8 KiB. Vite's development proxy must preserve the incoming Host (`changeOrigin: false`). A successful list mutation returns the account's authoritative workspace. Clients send granular commands and serialize pending actions. Identity and permissions come from the session, never from submitted owner fields.
+All URLs are same-origin. Errors have `{ "error": "Human-readable message" }`, an optional `code`, and a non-2xx status. JSON writes are limited to 5 MiB. All writes reject cross-site origins. Auth, invitation and sharing bodies are limited to 8 KiB. Vite's development proxy must preserve the incoming Host (`changeOrigin: false`). A successful list mutation returns the account's authoritative workspace. Clients send granular commands and serialize pending actions. Identity and permissions come from the session, never from submitted owner fields.
+
+## List covers
+
+The `list-covers` capability enables authenticated cover reads and uploads. The server also advertises `generated-list-covers` when automatic generation is configured. A workspace list with a saved image includes an optional `coverId` content hash.
+
+* `GET /api/lists/{listId}/cover?v={coverId}` returns private WebP bytes for an owner or current editor, or 404 when unavailable.
+* `PUT /api/lists/{listId}/cover` accepts a raw JPEG, PNG or WebP body up to 2 MiB. Gather checks membership and the request origin, decodes and scales the picture, strips metadata, and returns the updated workspace. This route is the binary exception to JSON writes.
+
+Covers share the lifetime of their owning list in SQLite. Duplicating a list copies its cover. Importing a portable JSON backup creates lists with the built-in artwork. Generation uses only the list title and description. The client sees the new hash on its regular workspace refresh.
 
 ## Sharing endpoints
 

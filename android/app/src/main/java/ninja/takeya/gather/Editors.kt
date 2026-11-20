@@ -339,6 +339,13 @@ fun ListForm(list: GatherList?, state: GatherState, model: GatherViewModel, dism
         else "",
     )
     FormText(title, { title = it }, "List name", 200, enabled = !state.busy)
+    if (list == null && "generated-list-covers" in state.capabilities) {
+        Text(
+            "Gather can use the list name and description to create an AI cover.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
     if (list == null)
         TextButton(onClick = { more = !more }, enabled = !state.busy) {
             Text(if (more) "Fewer options" else "More options")

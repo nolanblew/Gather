@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { InputError, bool, fail, id, object, string } from './input.mjs';
 import { WORKSPACE_VERSION, reorderGroups, bulkAdd, editAssignments, editDictionary, guardOrder, mapContentIds, orderToken, readItemOrganization, readOrganization, remapListContent } from './organization.mjs';
 import { seedWorkspace } from './seed.mjs';
+import { createCoverStore } from './covers.mjs';
 
 export { InputError, WORKSPACE_VERSION };
 export const WORKSPACE_BYTE_LIMIT = 5 * 1024 * 1024;
@@ -218,7 +219,7 @@ export function createStore(dataDir) {
 
 // User workspaces contain canonical owned content; per-user list presentation and
 // membership live separately so one editor cannot reorganize another's library.
-export function createUserStore(dataDir, { legacyOwnerId = null, username = () => 'Gather user' } = {}) {
+export function createUserStore(dataDir, { legacyOwnerId = null, username = () => 'Gather user', generateCovers = false } = {}) {
   mkdirSync(dataDir,{recursive:true});
   const db=new DatabaseSync(join(dataDir,'gather.sqlite'));
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
@@ -289,6 +290,7 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
     if(!row || (row.owner_id!==userId && !member.get(listId,userId))) throw new InputError('List not found or access has ended.',404);
     return row.owner_id;
   }
+  const covers = createCoverStore(db, { access, raw, transaction });
   function projection(userId) {
     ensure(userId);
     const own=raw(userId),lists=own.lists.map(l=>({...l,role:'owner',ownerUsername:username(userId)}));
@@ -307,7 +309,11 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
   }
   function get(userId) {
     const workspace=projection(userId);
-    for(const list of workspace.lists) list.orderToken=orderToken(list);
+    for(const list of workspace.lists) {
+      list.orderToken=orderToken(list);
+      const coverId=covers.id(list.id);
+      if (coverId) list.coverId=coverId;
+    }
     return workspace;
   }
   function persistProjection(userId,workspace,editedOwner=null,editedListId=null) {
@@ -353,6 +359,11 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
         // A clone of an editor's list is owned solely by the copying user.
       }
       persistProjection(userId,workspace,editedOwner,p.listId);
+      if (result?.createdListId) {
+        const active = !workspace.lists.find(list => list.id === result.createdListId).archived;
+        covers.onCreate(result.createdListId, type === 'list.clone' ? p.listId : null, generateCovers && active);
+      }
+      if (type === 'list.update' && editedOwner === userId && p.archived === true) covers.cancel(p.listId);
       return result;
     });
     return {...get(userId),...receipt};
@@ -393,7 +404,7 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
     return row;
   }
   return {
-    ensure,get,action,import:importCopies,export:exportOwned,
+    ensure,get,action,covers,import:importCopies,export:exportOwned,
     health:()=>db.prepare('SELECT 1').get(),
     sharing,
     invite(userId,listId) {

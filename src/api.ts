@@ -33,13 +33,17 @@ function notifyAuthExpired(path: string, response: Response) {
   }
 }
 
-async function request<T>(path: string, body?: unknown, fallback = 'Unable to save changes. Please try again.', signal?: AbortSignal): Promise<T> {
-  const response = await fetch(path, { cache: 'no-store', credentials: 'same-origin', signal, ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
+async function responseData<T>(path: string, response: Response, fallback: string): Promise<T> {
   const data = await readResponse(response) as { error?: string; code?: string } | null;
   notifyAuthExpired(path, response);
   if (!response.ok) throw new ApiError(data?.error || fallback, response.status, data?.code);
   if (!data || typeof data !== 'object') throw new ApiError('The server returned an invalid response. Please try again.', 502);
   return data as T;
+}
+
+async function request<T>(path: string, body?: unknown, fallback = 'Unable to save changes. Please try again.', signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, { cache: 'no-store', credentials: 'same-origin', signal, ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
+  return responseData<T>(path, response, fallback);
 }
 
 function authSession(value: unknown, requireAuthenticated = false): AuthSession {
@@ -60,6 +64,18 @@ function authSession(value: unknown, requireAuthenticated = false): AuthSession 
 export const getWorkspace = () => request<Workspace>('/api/workspace');
 export const runAction = (type: string, payload: Payload) => request<Workspace>('/api/actions', { type, payload });
 export const restoreWorkspace = (document: unknown) => request<Workspace>('/api/import', document);
+export const getCapabilities = () => request<{ features?: string[] }>('/api/capabilities');
+
+export function listCoverUrl(listId: string, coverId?: string) {
+  const path = `/api/lists/${encodeURIComponent(listId)}/cover`;
+  return coverId ? `${path}?v=${encodeURIComponent(coverId)}` : path;
+}
+
+export async function uploadListCover(listId: string, image: Blob) {
+  const path = listCoverUrl(listId);
+  const response = await fetch(path, { method: 'PUT', cache: 'no-store', credentials: 'same-origin', headers: { 'Content-Type': image.type }, body: image });
+  return responseData<Workspace>(path, response, 'Unable to save the cover. Please try again.');
+}
 
 export async function getSession(): Promise<AuthSession> {
   return authSession(await request<unknown>('/api/auth/session', undefined, 'Unable to verify your session. Please try again.'));

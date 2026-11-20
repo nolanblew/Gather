@@ -58,6 +58,7 @@ data class GatherList(
     val orderToken: String? = null,
     val personGroupOrder: List<String> = emptyList(),
     val placeGroupOrder: List<String> = emptyList(),
+    val coverId: String? = null,
 ) {
     val owner
         get() = role == "owner"
@@ -83,6 +84,9 @@ data class Session(
     val username: String? = null,
     val accessToken: String? = null,
 )
+
+@Serializable
+data class ApiCapabilities(val features: List<String> = emptyList())
 
 @Serializable data class Member(val userId: String, val username: String)
 

@@ -1,14 +1,18 @@
 import AnimatedChecklist from './AnimatedChecklist';
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { ArrowDown, ArrowLeft, ArrowUp, Check, ChevronDown, Copy, GripVertical, Link2, ListOrdered, MapPin, MoreHorizontal, Plus, Search, SlidersHorizontal, SquareCheck, Star, UserRoundPlus, Users, X } from 'lucide-react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { flushSync } from 'react-dom';
+import { ArrowDown, ArrowLeft, ArrowUp, Check, ChevronDown, ChevronRight, Copy, GripVertical, Link2, ListOrdered, MapPin, MoreHorizontal, Plus, Search, SlidersHorizontal, SquareCheck, Star, UserRoundPlus, Users, X } from 'lucide-react';
+import { listCoverUrl } from './api';
 import { useAuth } from './auth';
 import Dialog from './Dialog';
 import GroupOrderDialog from './GroupOrderDialog';
 import ItemEditor, { makeItemDraft, PersonPicker, PlacesPicker } from './ItemEditor';
+import normalizeCover from './normalizeCover';
 import { DescriptionPreview, DictionaryDialog, ViewDialog } from './OrganizationDetails';
 import { byPosition, canonicalItemGroups, itemGroupIds, itemOrdinals, reorderItemIds, sortItemGroupIds, splitItemGroups, type ItemGrouping, type ItemSort } from './itemOrder';
-import { emptyFilters, filterDefaults, filterLabels, hasFilters, itemRecipientIds, matchesListFilters, namedPersonId, namedPlaceId, noAvailability, orderGuard, placeLabel, placeSummary } from './organization';
+import { emptyFilters, filterDefaults, filterLabels, filterOptions, hasFilters, itemRecipientIds, matchesListFilters, namedPersonId, namedPlaceId, noAvailability, orderGuard, personFilter, placeFilter, placeLabel, placeSummary } from './organization';
 import { useItemDrag } from './useItemDrag';
+import useListHeaderMotion from './useListHeaderMotion';
 import type { ListFilters } from './organization';
 import type { Category, GatherList, Item, Mutation, Payload, Section, Workspace } from './types';
 
@@ -41,6 +45,9 @@ interface Props {
   clone: () => void;
   listConfirm: (action: 'archive' | 'delete' | 'reset') => void;
   share: () => void;
+  openAppearance: () => void;
+  openSettings: () => void;
+  uploadCover?: (image: Blob) => Promise<boolean>;
 }
 
 function storedSort(key: string): ItemSort | null {
@@ -53,6 +60,8 @@ function storedSort(key: string): ItemSort | null {
 function ActionMenu({ label, children }: { label: string; children: ReactNode }) {
   return <details className="context-menu" onClick={event => {
     if ((event.target as HTMLElement).closest('button')) { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus(); }
+  }} onBlur={event => {
+    if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
   }} onKeyDown={event => {
     if (event.key === 'Escape') { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus(); }
   }}>
@@ -60,13 +69,15 @@ function ActionMenu({ label, children }: { label: string; children: ReactNode })
   </details>;
 }
 
-export default function ListEditor({ list, category, icon, badges, organization, busy, error, clearError, savedView, updateView, mutate, back, edit, section, removeSection, clone, listConfirm, share }: Props) {
+export default function ListEditor({ list, category, icon, badges, organization, busy, error, clearError, savedView, updateView, mutate, back, edit, section, removeSection, clone, listConfirm, share, openAppearance, openSettings, uploadCover }: Props) {
   const { session } = useAuth();
   const sortKey = `gather-list-sort:${session.userId || session.username}:${list.id}`;
   const [draft, setDraft] = useState('');
   const [addSection, setAddSection] = useState('');
   const [addError, setAddError] = useState('');
   const [query, setQuery] = useState(savedView?.query || '');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchFieldId = useId();
   const [filters, setFilters] = useState<ListFilters>(savedView?.filters || emptyFilters);
   const [doneOpen, setDoneOpen] = useState<boolean | null>(null);
   const [showDetails, setShowDetails] = useState(savedView?.showDetails ?? true);
@@ -81,8 +92,15 @@ export default function ListEditor({ list, category, icon, badges, organization,
   const [editing, setEditing] = useState<{ item: Item; fromQuickAdd: boolean } | null>(null);
   const [hiddenItemId, setHiddenItemId] = useState<string | null>(null);
   const [filterMessage, setFilterMessage] = useState('');
+  const [coverBusy, setCoverBusy] = useState(false);
+  const [coverNotice, setCoverNotice] = useState('');
+  const [coverError, setCoverError] = useState('');
+  const [brokenCoverId, setBrokenCoverId] = useState<string>();
   const addRef = useRef<HTMLInputElement>(null);
-  const editorRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const searchButtonRef = useRef<HTMLButtonElement>(null);
+  const coverFileRef = useRef<HTMLInputElement>(null);
+  const { editorRef, toolbarRef, heroRef, titleRef } = useListHeaderMotion();
   const reviewOrderId = useRef('');
   const previousList = useRef(list);
   const done = list.items.filter(item => item.checked).length;
@@ -127,8 +145,38 @@ export default function ListEditor({ list, category, icon, badges, organization,
   const selectedItems = list.items.filter(item => selection.has(item.id));
   const selectedCount = selectedItems.length;
   const selectedAnywhere = selectedItems.filter(item => item.availability?.mode === 'anywhere').map(item => item.id);
+  const coverSrc = list.coverId && brokenCoverId !== list.coverId ? listCoverUrl(list.id, list.coverId) : undefined;
+
+  const closeSearch = () => {
+    setSearchOpen(false);
+    searchButtonRef.current?.focus({ preventScroll: true });
+  };
+  const toggleSearch = () => {
+    if (searchOpen) { closeSearch(); return; }
+    flushSync(() => setSearchOpen(true));
+    searchRef.current?.focus({ preventScroll: true });
+  };
+  const changeCover = async (file: File) => {
+    if (!uploadCover || busy || coverBusy) return;
+    setCoverBusy(true);
+    setCoverNotice('');
+    setCoverError('');
+    clearError();
+    try {
+      const image = await normalizeCover(file);
+      if (await uploadCover(image)) { setBrokenCoverId(undefined); setCoverNotice('Cover updated.'); }
+      else setCoverError('Couldn’t save the cover. Try again.');
+    } catch (failure) {
+      setCoverError(failure instanceof Error ? failure.message : 'Couldn’t prepare the cover.');
+    } finally { setCoverBusy(false); }
+  };
 
   useEffect(() => { if (!list.items.length) addRef.current?.focus(); }, []);
+  useEffect(() => {
+    if (!coverNotice) return;
+    const timer = window.setTimeout(() => setCoverNotice(''), 3000);
+    return () => clearTimeout(timer);
+  }, [coverNotice]);
   useEffect(() => { updateView({ query, filters, showDetails, sort, groupBy }); }, [query, filters, showDetails, sort, groupBy]);
   useEffect(() => {
     const previous = previousList.current;
@@ -211,8 +259,12 @@ export default function ListEditor({ list, category, icon, badges, organization,
     drag.cancel();
     setMode(null);
     setSelection(new Set());
-    const selector = mode === 'select' ? '[data-select-items]' : '[aria-label="List actions"]';
-    requestAnimationFrame(() => (editorRef.current?.querySelector<HTMLElement>(selector) || addRef.current)?.focus());
+    requestAnimationFrame(() => (editorRef.current?.querySelector<HTMLElement>('[aria-label="List actions"]') || addRef.current)?.focus({ preventScroll: true }));
+  };
+  const startSelection = () => {
+    setActionMessage('');
+    setMode('select');
+    requestAnimationFrame(() => editorRef.current?.querySelector<HTMLButtonElement>('[data-finish-mode]')?.focus({ preventScroll: true }));
   };
   const startReorder = (groupsOnly = false) => {
     setActionMessage('');
@@ -222,7 +274,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
       setGroupOrderOpen(true);
       return;
     }
-    requestAnimationFrame(() => editorRef.current?.querySelector<HTMLButtonElement>('[data-finish-mode]')?.focus());
+    requestAnimationFrame(() => editorRef.current?.querySelector<HTMLButtonElement>('[data-finish-mode]')?.focus({ preventScroll: true }));
   };
   const toggleSelection = (id: string) => setSelection(previous => {
     const next = new Set(previous);
@@ -299,7 +351,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
         </button>
         {showDetails && item.note && <DescriptionPreview text={item.note} className="item-description" />}
       </div>
-      <button className="icon-button item-menu" aria-label={`Edit ${item.text}`} onClick={() => openItem(item)}><MoreHorizontal size={21} /></button>
+      <button className="icon-button item-menu" aria-label={`Edit ${item.text}`} onClick={() => openItem(item)}><ChevronRight size={18} aria-hidden="true" /></button>
     </div>;
   };
 
@@ -312,7 +364,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
       const bucket = JSON.stringify([sectionId, completed, group.id]);
       const rows = group.items.map((item, index) => row(item, group.id, bucket, itemIds, index));
       return group.id ? <section className="item-subgroup" key={group.id}>
-        <Heading data-motion-row={bucket}>{groupLabel(group.id)}</Heading>{rows}
+        <Heading data-motion-row={bucket} data-jump-group={group.id} tabIndex={-1}>{groupLabel(group.id)}</Heading>{rows}
       </section> : rows;
     });
   };
@@ -323,21 +375,48 @@ export default function ListEditor({ list, category, icon, badges, organization,
   const showCheckedSections = Boolean(mode === 'reorder' || groupBy !== 'none');
   const canReorderItems = Boolean(list.orderToken && list.items.length > 1);
   const canReorderGroups = groupBy !== 'none' && (orderedGroupIds.length > 1 || storedGroupOrder.length > 0);
-  return <div className={`editor${mode ? ' editor-mode-active' : ''}`} ref={editorRef} onKeyDown={event => {
+  const contextGroups = new Map<string, number>();
+  if (groupBy !== 'none') for (const item of list.items) {
+    if (!isVisible(item) || (isChecklist && !list.numbered && item.checked && !showDone)) continue;
+    for (const id of itemGroupIds(item, groupBy)) contextGroups.set(id, (contextGroups.get(id) ?? 0) + 1);
+  }
+  const contextSections = groupBy === 'none' ? groups.filter(group => group.title
+    && (group.id !== null && !filtered || group.items.some(item => isVisible(item) && (!isChecklist || list.numbered || !item.checked)))) : [];
+  const assignments = useMemo(() => filterOptions(list), [list]);
+  const jumpTo = (attribute: 'data-jump-group' | 'data-jump-section', id: string) => {
+    const heading = editorRef.current?.querySelector<HTMLElement>(`[${attribute}="${CSS.escape(id)}"]`);
+    heading?.focus({ preventScroll: true });
+    heading?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  };
+  const listSummary = <>
+    {list.description && <DescriptionPreview text={list.description} lines={3} />}
+    <div className="list-hero-meta">
+      <div className="editor-badges">{category && <span className="badge category-badge"><span className={`dot ${category.color}`} />{category.name}</span>}{badges}</div>
+      <span className="list-access-label">{list.shared ? list.role === 'editor' ? `Owned by ${list.ownerUsername}` : 'You own this list' : 'Private · Only you have access'}</span>
+    </div>
+    {list.items.length > 0 && (isChecklist ? <div className="list-hero-progress">
+      <span><strong>{done} of {list.items.length}</strong> complete</span>
+      <div className="progress-track" aria-hidden="true"><div style={{ width: `${done / list.items.length * 100}%` }} /></div>
+    </div> : <div className="list-hero-count">{list.items.length} {list.items.length === 1 ? 'item' : 'items'}</div>)}
+  </>;
+  return <div className={`editor list-editor-layout${mode ? ' editor-mode-active' : ''}`} ref={editorRef} onKeyDown={event => {
     if (event.key === 'Escape' && drag.preview) { event.stopPropagation(); drag.cancel(); }
   }}>
-    <div className="editor-back"><button className="text-button" onClick={back}><ArrowLeft size={18} />Back to collection</button></div>
-    <header className="editor-heading">
-      <div className={`editor-icon ${list.color}`}>{icon}</div>
-      <div className="editor-title">
-        <div className="editor-badges"><span className="badge category-badge"><span className={`dot ${category?.color || list.color}`} />{category?.name || 'Uncategorized'}</span>{badges}</div>
-        <h1>{list.title}</h1>
-        {list.description && <DescriptionPreview text={list.description} lines={3} />}
-      </div>
-      <div className="editor-actions">
-        <button className={`icon-button favorite ${list.favorite ? 'is-favorite' : ''}`} aria-label={list.favorite ? 'Unfavorite list' : 'Favorite list'} aria-pressed={list.favorite} disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, favorite: !list.favorite })}><Star size={23} fill={list.favorite ? 'currentColor' : 'none'} /></button>
+    <div className="editor-pane">
+      <div className="list-topbar" ref={toolbarRef}>
+        <div className="list-toolbar-content">
+          <button className="icon-button list-back" aria-label="Back to collection" title="Back to collection" onClick={back}><ArrowLeft size={20} aria-hidden="true" /></button>
+          <span className="list-compact-title" aria-hidden="true" title={list.title}>{list.title}</span>
+          {!mode && (list.items.length > 0 || query) && <>
+            <button className={`icon-button list-search-toggle${query || searchOpen ? ' is-active' : ''}`} ref={searchButtonRef}
+              aria-label="Search items" title="Search items" aria-expanded={searchOpen} aria-controls={searchFieldId} onClick={toggleSearch}><Search size={20} aria-hidden="true" /></button>
+            <button className="list-view-toggle" onClick={() => openOverlay('filters')}><SlidersHorizontal size={18} aria-hidden="true" />View</button>
+          </>}
         <ActionMenu label="List actions">
           <button onClick={edit}>Edit details</button>
+          {uploadCover && <button disabled={busy || coverBusy} onClick={() => coverFileRef.current?.click()}>Change cover…</button>}
+          <button aria-pressed={list.favorite} disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, favorite: !list.favorite })}>{list.favorite ? 'Unfavorite list' : 'Favorite list'}</button>
+          {!mode && organization && list.items.length > 0 && <button disabled={busy} onClick={startSelection}>Select items</button>}
           {!mode && list.items.length > 0 && <button onClick={() => openOverlay('filters')}>Filter this list</button>}
           {!mode && (canReorderItems || canReorderGroups) && <button disabled={busy} onClick={() => startReorder(!canReorderItems)}>{canReorderItems ? 'Reorder items' : 'Reorder groups'}</button>}
           {organization && list.role !== 'editor' && <button aria-pressed={Boolean(list.numbered)} aria-description={list.shared ? 'Everyone who can see this list sees item numbers.' : undefined} disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, numbered: !list.numbered, ...orderGuard(list, true) })}>{list.numbered && <Check size={16} aria-hidden="true" />}Number items</button>}
@@ -351,28 +430,50 @@ export default function ListEditor({ list, category, icon, badges, organization,
           {isChecklist && !list.archived && done > 0 && <button onClick={() => listConfirm('reset')}>Start again</button>}
           {list.archived ? <button disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, archived: false })}>Restore for me</button> : <button onClick={() => listConfirm('archive')}>Archive for me</button>}
           {list.role !== 'editor' && <button className="danger-text" onClick={() => listConfirm('delete')}>Delete list</button>}
+          <button className="list-mobile-setting" onClick={openAppearance}>Appearance</button>
+          <button className="list-mobile-setting" onClick={openSettings}>Settings & backup</button>
         </ActionMenu>
+        </div>
+        {!mode && searchOpen && <div className="list-search-panel" id={searchFieldId}>
+          <label className="item-search"><Search size={18} aria-hidden="true" /><input ref={searchRef} aria-label="Filter items" placeholder="Filter items" value={query} maxLength={500}
+            onChange={event => { setQuery(event.target.value); setDoneOpen(null); }}
+            onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); closeSearch(); } }} /></label>
+          {query && <button className="icon-button" aria-label="Clear item search" onClick={() => { setQuery(''); searchRef.current?.focus({ preventScroll: true }); }}><X size={18} aria-hidden="true" /></button>}
+        </div>}
+        <div className={coverBusy || coverNotice ? 'list-cover-status' : 'visually-hidden'} role="status">{coverBusy ? 'Preparing and saving cover…' : coverNotice}</div>
+        {coverError && <div className="list-cover-status list-cover-error" role="alert">{error || coverError}<button className="icon-button" aria-label="Dismiss cover error" onClick={() => { setCoverError(''); clearError(); }}><X size={17} aria-hidden="true" /></button></div>}
+        {error && !coverBusy && !coverError && !editing && !bulk && !overlay && !groupOrderOpen && <div className="list-cover-status list-cover-error" role="alert">
+          {error}<button className="icon-button" aria-label="Dismiss error" onClick={clearError}><X size={17} aria-hidden="true" /></button>
+        </div>}
       </div>
-    </header>
-    {list.isTemplate && <div className="template-banner"><span>This is a reusable template. Start a list to create a private copy.</span><button className="primary" disabled={busy} onClick={clone}><Copy size={17} />Start list</button></div>}
-    <div className="list-sharing-line"><span>{list.shared ? <><Users size={16} aria-hidden="true" />Shared · {list.role === 'editor' ? `Owned by ${list.ownerUsername}` : 'You own this list'}</> : 'Private · Only you have access'}</span><button className="secondary" disabled={busy} onClick={share}><Users size={17} aria-hidden="true" />{list.role === 'editor' ? 'People & access' : 'Share'}</button></div>
-    {list.items.length > 0 && (isChecklist ? <div className="editor-progress"><div className="progress-summary"><span><strong>{done} of {list.items.length}</strong> done <span className="small-muted">· {list.items.length - done} remaining</span></span></div><div className="progress-track"><div style={{ width: `${done / list.items.length * 100}%` }} /></div></div> : <div className="editor-count">{list.items.length} {list.items.length === 1 ? 'item' : 'items'}</div>)}
-    {!mode && (list.items.length > 0 || query) && <div className="editor-toolbar organization-toolbar">
-      <label className="item-search"><Search size={17} aria-hidden="true" /><input aria-label="Filter items" placeholder="Filter items" value={query} onChange={event => { setQuery(event.target.value); setDoneOpen(null); }} /></label>
-      <div className="list-view-actions">
-        {query && <button className="icon-button" aria-label="Clear item search" onClick={() => setQuery('')}><X size={17} /></button>}
-        <button className="secondary" onClick={() => openOverlay('filters')}><SlidersHorizontal size={16} aria-hidden="true" />View</button>
-        {organization && list.items.length > 0 && <button className="secondary" data-select-items="" disabled={busy} onClick={() => {
-          setActionMessage('');
-          setMode('select');
-          requestAnimationFrame(() => editorRef.current?.querySelector<HTMLButtonElement>('[data-finish-mode]')?.focus());
-        }}><SquareCheck size={17} aria-hidden="true" />Select items</button>}
-      </div>
-    </div>}
-    {(usingFilters || groupBy !== 'none') && <div className="active-list-filters">
-      {mode ? <span>{groupBy !== 'none' ? `Grouped by ${groupBy} · ` : ''}{usingFilters ? summary : `${shown} ${shown === 1 ? 'item' : 'items'}`}</span> :
-        <button className="text-button" onClick={() => openOverlay('filters')}><span>{groupBy !== 'none' ? `Grouped by ${groupBy} · ` : ''}{usingFilters ? summary : `${shown} ${shown === 1 ? 'item' : 'items'}`}</span><ChevronDown size={16} aria-hidden="true" /></button>}
-      {!mode && usingFilters && <button className="text-button" onClick={clearFilters}>Clear</button>}
+      {uploadCover && <input type="file" ref={coverFileRef} accept="image/*" hidden aria-label="Choose a list cover photo" onChange={event => {
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = '';
+        if (file) void changeCover(file);
+      }} />}
+      <header className="list-hero" ref={heroRef}>
+        <div className="list-hero-art" aria-hidden="true">
+          {coverSrc && <img key={coverSrc} className="list-cover-photo" alt="" src={coverSrc} onError={() => setBrokenCoverId(list.coverId)} />}
+        </div>
+        <div className="list-hero-body">
+          <div className="list-hero-main">
+            <div className="list-hero-name">
+              <span className={`list-hero-icon ${list.color}`}>{icon}</span>
+              <h1 ref={titleRef}>{list.title}</h1>
+            </div>
+            <div className="list-hero-actions">
+              <button className={`icon-button favorite ${list.favorite ? 'is-favorite' : ''}`} aria-label={list.favorite ? 'Unfavorite list' : 'Favorite list'} aria-pressed={list.favorite} disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, favorite: !list.favorite })}><Star size={21} fill={list.favorite ? 'currentColor' : 'none'} /></button>
+              <button className="icon-button" aria-label={list.role === 'editor' ? 'People & access' : 'Share'} title={list.role === 'editor' ? 'People & access' : 'Share'} disabled={busy} onClick={share}><Users size={20} aria-hidden="true" /></button>
+            </div>
+          </div>
+          <div className="list-hero-summary">{listSummary}</div>
+        </div>
+      </header>
+      {list.isTemplate && <div className="template-banner"><span>This is a reusable template. Start a list to create a private copy.</span><button className="primary" disabled={busy} onClick={clone}><Copy size={17} />Start list</button></div>}
+    {(filtered || groupBy !== 'none') && <div className="active-list-filters">
+      {mode ? <span>{groupBy !== 'none' ? `Grouped by ${groupBy} · ` : ''}{filtered ? summary : `${shown} ${shown === 1 ? 'item' : 'items'}`}</span> :
+        <button className="text-button" onClick={() => filtered && !usingFilters && groupBy === 'none' ? toggleSearch() : openOverlay('filters')}><span>{groupBy !== 'none' ? `Grouped by ${groupBy} · ` : ''}{filtered ? summary : `${shown} ${shown === 1 ? 'item' : 'items'}`}</span><ChevronDown size={16} aria-hidden="true" /></button>}
+      {!mode && filtered && <button className="text-button" onClick={clearFilters}>Clear</button>}
     </div>}
     {mode === 'select' && <div className="list-mode-bar" aria-label="Item selection">
       <strong className="mode-title" aria-live="polite"><SquareCheck size={17} aria-hidden="true" />{selectedCount} selected</strong>
@@ -405,7 +506,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
         if (!visible.length && (filtered || group.id === null)) return null;
         const currentSection = orderedSections[index - 1];
         return <section className="item-group" key={group.id || 'none'}>
-          {group.title && <div className="section-heading"><h2>{group.title}</h2><span className="small-muted">{visible.length}</span>{currentSection && !mode && <ActionMenu label={`${group.title} section actions`}>
+          {group.title && <div className="section-heading"><h2 data-jump-section={group.id ?? ''} tabIndex={-1}>{group.title}</h2><span className="small-muted">{visible.length}</span>{currentSection && !mode && <ActionMenu label={`${group.title} section actions`}>
             <button onClick={() => section(currentSection)}>Rename section</button>
             {filtered ? <button onClick={clearFilters}>Edit order</button> : <>
               <button disabled={busy || index <= 1} onClick={() => void mutate('section.move', { listId: list.id, sectionId: group.id, index: index - 2, ...orderGuard(list) })}>Move section up</button>
@@ -436,6 +537,44 @@ export default function ListEditor({ list, category, icon, badges, organization,
       }}>Edit details</button></div>}
       {addError && <span className="field-error" role="alert">{addError}</span>}
     </form></div>}
+    </div>
+    <aside className="list-context-rail" aria-label="List overview">
+      <section className="list-rail-summary">
+        <h2>List details</h2>
+        {listSummary}
+        {!list.items.length && <span className="list-hero-count">0 items</span>}
+      </section>
+      {contextGroups.size > 0 ? <>
+        <h2>Jump to {groupBy === 'place' ? 'place' : 'person'}</h2>
+        <ul>{orderedGroupIds.filter(id => contextGroups.has(id)).map(id => <li key={id}>
+          <button type="button" className="list-rail-link" onClick={() => jumpTo('data-jump-group', id)}>{groupLabel(id)}<span>{contextGroups.get(id)}</span></button>
+        </li>)}</ul>
+      </> : contextSections.length > 0 ? <>
+        <h2>Jump to section</h2>
+        <ul>{contextSections.map(group => <li key={group.id ?? ''}>
+          <button type="button" className="list-rail-link" onClick={() => jumpTo('data-jump-section', group.id ?? '')}>{group.title}</button>
+        </li>)}</ul>
+      </> : !mode && <>
+        {assignments.places.size > 0 && <>
+          <h2>Places</h2>
+          <ul>{(list.places || []).filter(place => assignments.places.has(place.id)).map(place => <li key={place.id}>
+            <button type="button" className="list-rail-link" aria-pressed={activePlace === place.id} onClick={() => {
+              setFilters({ ...activeFilters, place: activePlace === place.id ? 'all' : placeFilter(place.id) });
+              setDoneOpen(null);
+            }}>{placeLabel(place)}</button>
+          </li>)}</ul>
+        </>}
+        {assignments.people.size > 0 && <>
+          <h2>Recipients</h2>
+          <ul>{(list.recipients || []).filter(person => assignments.people.has(person.id)).map(person => <li key={person.id}>
+            <button type="button" className="list-rail-link" aria-pressed={activePerson === person.id} onClick={() => {
+              setFilters({ ...activeFilters, person: activePerson === person.id ? 'all' : personFilter(person.id) });
+              setDoneOpen(null);
+            }}>{person.name}</button>
+          </li>)}</ul>
+        </>}
+      </>}
+    </aside>
     {overlay === 'filters' && <ViewDialog list={list} filters={activeFilters} query={filterQuery} sort={sort} groupBy={groupBy} close={() => setOverlay(null)} apply={(next, nextSort, nextGroup) => {
       setFilters(next); if (nextSort !== sort) chooseSort(nextSort); setGroupBy(nextGroup); setOverlay(null); setFilterMessage(''); setHiddenItemId(null); setDoneOpen(null);
     }} />}

@@ -110,7 +110,7 @@ class GatherAcceptanceTest {
         val browserCookie = fixture.browserLogin()
         val webItem = "From browser ${fixture.runId}"
         fixture.action("item.create", json("listId" to listId, "text" to webItem), cookie = browserCookie)
-        clickDescription("Refresh lists")
+        refreshLists()
         scrollText(webItem)
         compose.onNodeWithText(webItem).assertIsDisplayed()
 
@@ -129,7 +129,7 @@ class GatherAcceptanceTest {
 
         // A separate native account joins, edits and then loses authorization.
         val memberToken = fixture.secondAccount()
-        clickDescription("Share list")
+        clickListOption("Share list")
         waitText("Create invitation")
         compose.onNodeWithTag("editor-save").performScrollTo().performClick()
         waitText("Copy link")
@@ -145,7 +145,7 @@ class GatherAcceptanceTest {
         fixture.request("/api/invitations/join", json("token" to inviteLink.substringAfter("#invite=")), memberToken)
         val sharedItem = "From collaborator ${fixture.runId}"
         fixture.action("item.create", json("listId" to listId, "text" to sharedItem), memberToken)
-        clickDescription("Refresh lists")
+        refreshLists()
         scrollText(sharedItem)
         compose.onNodeWithText(sharedItem).assertIsDisplayed()
         val memberId = fixture.request("/api/native/auth/session", bearer = memberToken).getString("userId")
@@ -168,7 +168,7 @@ class GatherAcceptanceTest {
             }
         fixture.action("list.update", json("listId" to listId, "categoryId" to categoryId), cookie = browserCookie)
         val categoryModel = viewModel()
-        clickDescription("Refresh lists")
+        refreshLists()
         compose.waitUntil(20_000) { categoryModel.state.value.workspace.categories.singleOrNull()?.id == categoryId }
         scrollText(categoryName)
         compose.onNodeWithText(categoryName).performScrollTo().performTouchInput { click() }
@@ -176,7 +176,7 @@ class GatherAcceptanceTest {
         scrollText(title)
         compose.onNodeWithText(title).assertIsDisplayed()
         fixture.action("category.delete", json("categoryId" to categoryId), cookie = browserCookie)
-        clickDescription("Refresh lists")
+        refreshLists()
         compose.waitUntil(20_000) { categoryModel.state.value.workspace.categories.isEmpty() }
         assertNull("A category removed by another client must clear the active filter", categoryModel.state.value.categoryId)
         compose.onAllNodesWithText(categoryName).assertCountEquals(0)
@@ -210,7 +210,7 @@ class GatherAcceptanceTest {
         val master = fixture.action("list.create", json("title" to masterTitle, "isTemplate" to true))
         val masterId = master.getString("createdListId")
         fixture.action("item.create", json("listId" to masterId, "text" to "Pack shoes", "checked" to true))
-        clickDescription("Refresh lists")
+        refreshLists()
         click("Templates")
         scrollText(masterTitle)
         click(masterTitle)
@@ -261,7 +261,7 @@ class GatherAcceptanceTest {
         compose.onNodeWithText("Cancel").performScrollTo().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("editor-save").fetchSemanticsNodes().isEmpty() }
         waitDescription("Refresh lists")
-        clickDescription("Refresh lists")
+        refreshLists()
         scrollText("Forest")
         click("Forest")
         compose.onNodeWithText("Forest").assertIsSelected()
@@ -761,7 +761,7 @@ class GatherAcceptanceTest {
         click("Person")
         click("Apply")
         scrollText("Grouped by person · 2 items")
-        click("Select items")
+        clickListOption("Select items")
         scrollText("Alex")
         scrollDescription("Select Shared gift")
         compose.onAllNodesWithContentDescription("Select Shared gift").onFirst().performClick()
@@ -820,7 +820,7 @@ class GatherAcceptanceTest {
 
         scrollDescription("List options")
         clickDescription("List options")
-        click("Edit order")
+        click("Reorder items")
         scrollText("Reorder groups")
         click("Reorder groups")
         clickDescription("Move Maya up")
@@ -959,7 +959,7 @@ class GatherAcceptanceTest {
         click("Clear")
         scrollDescription("List options")
         clickDescription("List options")
-        click("Edit order")
+        click("Reorder items")
         waitText("Manual order")
         val teaHandle = compose.onNodeWithContentDescription("Drag Tea")
         val teaCenter = teaHandle.fetchSemanticsNode().boundsInRoot.center
@@ -999,6 +999,45 @@ class GatherAcceptanceTest {
         click("Cancel")
         scrollText("Stationery")
         compose.onNodeWithText("Stationery").assertIsDisplayed()
+    }
+
+    @Test fun listCoverCollapsesAndReturnsAtTheTop() {
+        val fixture = LocalAcceptanceFixture()
+        val title = "Japan Gift List ${fixture.runId}"
+        val created = fixture.action("list.create", json("title" to title, "description" to "Gifts to bring home from Kyoto"))
+        val listId = created.getString("createdListId")
+        val gifts = listOf("Takayama Gatcha Snow Globe", "Onsen bath salts", "Apple Tea", "Zelda Switch Controller", "Baby Train Toys")
+        repeat(20) { index ->
+            fixture.action("item.create", json("listId" to listId, "text" to (gifts.getOrNull(index) ?: "Gift ${index + 1}")))
+        }
+        val resources = InstrumentationRegistry.getInstrumentation().targetContext.resources
+        val connection = java.net.URL(fixture.baseUrl.trimEnd('/') + "/api/lists/$listId/cover").openConnection() as java.net.HttpURLConnection
+        try {
+            connection.requestMethod = "PUT"
+            connection.doOutput = true
+            connection.setRequestProperty("Authorization", "Bearer ${fixture.token}")
+            connection.setRequestProperty("Content-Type", "image/webp")
+            connection.outputStream.use { out -> resources.openRawResource(R.drawable.list_hero).use { it.copyTo(out) } }
+            assertEquals(200, connection.responseCode)
+        } finally {
+            connection.disconnect()
+        }
+        signIn(fixture)
+        scrollText(title)
+        click(title)
+        waitTag("detail-cover")
+        compose.onNodeWithTag("detail-summary").assertIsDisplayed()
+        captureOrganizationScreenshot("list-cover-expanded")
+        val top = compose.onNodeWithTag("detail-toolbar").fetchSemanticsNode().boundsInRoot.top
+        compose.onNodeWithTag("detail-items").performTouchInput { swipeUp() }
+        waitTag("detail-compact-title")
+        compose.onNodeWithTag("detail-compact-title").assertTextContains(title)
+        assertEquals(top, compose.onNodeWithTag("detail-toolbar").fetchSemanticsNode().boundsInRoot.top, 1f)
+        compose.onNodeWithTag("quick-item-text").assertIsDisplayed()
+        captureOrganizationScreenshot("list-cover-compact")
+        compose.onNodeWithTag("detail-items").performScrollToIndex(0)
+        waitTag("detail-cover")
+        compose.onNodeWithTag("detail-summary").assertIsDisplayed()
     }
 
     private fun captureOrganizationScreenshot(name: String) {
@@ -1098,6 +1137,15 @@ class GatherAcceptanceTest {
         compose.onAllNodesWithText(text, useUnmergedTree = true).onFirst().performTouchInput { click() }
     }
     private fun clickDescription(text: String) { waitDescription(text); compose.onNodeWithContentDescription(text).performClick() }
+    private fun clickListOption(text: String) {
+        clickDescription("List options")
+        click(text)
+    }
+
+    private fun refreshLists() {
+        if (viewModel().state.value.selectedId != null) clickListOption("Refresh lists")
+        else clickDescription("Refresh lists")
+    }
     private fun scrollText(text: String) {
         scrollTo(hasText(text), text)
     }
@@ -1105,6 +1153,8 @@ class GatherAcceptanceTest {
         scrollTo(hasContentDescription(text), text)
     }
     private fun scrollTo(matcher: SemanticsMatcher, label: String) {
+        val matches = compose.onAllNodes(matcher)
+        if (matches.fetchSemanticsNodes().indices.any { runCatching { matches[it].assertIsDisplayed() }.isSuccess }) return
         var lastFailure: Throwable? = null
         try {
             compose.waitUntil(20_000) {
@@ -1126,7 +1176,8 @@ class GatherAcceptanceTest {
         val deadline = SystemClock.elapsedRealtime() + 20_000
         while (SystemClock.elapsedRealtime() < deadline) {
             if (condition()) {
-                compose.waitUntil(20_000) { compose.onAllNodes(hasContentDescription("Refresh lists") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
+                val model = viewModel()
+                compose.waitUntil(20_000) { !model.state.value.busy }
                 compose.waitForIdle()
                 return
             }

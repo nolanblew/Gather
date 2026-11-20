@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createUserStore, InputError, WORKSPACE_BYTE_LIMIT, WORKSPACE_VERSION } from './store.mjs';
 import { createSearchService } from './search.mjs';
 import { createAuth } from './auth.mjs';
+import { readCoverUpload, coverGenerationEnabled, createCoverWorker } from './covers.mjs';
 
 const BODY_LIMIT = WORKSPACE_BYTE_LIMIT;
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.webmanifest': 'application/manifest+json' };
@@ -19,21 +20,23 @@ function checkOrigin(req) {
   let origin; try { origin = new URL(req.headers.origin); } catch { throw new InputError('Invalid origin.', 403); }
   if (!['http:', 'https:'].includes(origin.protocol) || origin.host !== req.headers.host) throw new InputError('Origin must match this server.', 403);
 }
-export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), distDir = resolve('dist'), searchEnv = process.env, authEnv = process.env } = {}) {
+export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), distDir = resolve('dist'), searchEnv = process.env, authEnv = process.env, coverEnv = process.env } = {}) {
   let store;
   let auth;
   let search;
+  let coverWorker;
   try {
     auth = createAuth({ dataDir, env: authEnv });
-    store = createUserStore(dataDir, { legacyOwnerId: auth.legacyOwnerId, username: auth.username });
+    store = createUserStore(dataDir, { legacyOwnerId: auth.legacyOwnerId, username: auth.username, generateCovers: coverGenerationEnabled(coverEnv) });
     search = createSearchService({ dataDir, env: searchEnv });
+    coverWorker = createCoverWorker(store.covers, coverEnv);
   }
   catch (error) { auth?.close(); store?.close(); throw error; }
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'same-origin');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
     const json = (status, value) => { res.statusCode = status; res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.end(JSON.stringify(value)); };
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -46,7 +49,11 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
           if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) throw new InputError('Use application/json.', 415);
         }
         if (req.method === 'GET' && url.pathname === '/api/health') { store.health(); return json(200, { status: 'ok' }); }
-        if (req.method === 'GET' && url.pathname === '/api/capabilities') return json(200, { apiVersion: 1, workspaceVersion: WORKSPACE_VERSION, authentication: ['cookie', 'bearer'], features: ['sharing', 'search', 'import', 'export', 'list-organization', 'numbered-lists', 'guarded-order', 'multiple-recipients', 'bulk-assignments', 'visible-item-order', 'group-order'] });
+        if (req.method === 'GET' && url.pathname === '/api/capabilities') {
+          const features = ['sharing', 'search', 'import', 'export', 'list-organization', 'numbered-lists', 'guarded-order', 'multiple-recipients', 'bulk-assignments', 'visible-item-order', 'group-order', 'list-covers'];
+          if (coverGenerationEnabled(coverEnv)) features.push('generated-list-covers');
+          return json(200, { apiVersion: 1, workspaceVersion: WORKSPACE_VERSION, authentication: ['cookie', 'bearer'], features });
+        }
         if (url.pathname.startsWith('/api/native/auth/')) {
           const method=url.pathname.slice('/api/native/auth/'.length);
           if (method==='session' && req.method==='GET') return json(200,auth.session(req,'bearer'));
@@ -66,6 +73,25 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
         if (url.pathname === '/api/auth/password' && req.method === 'POST') { const result = await auth.password(await body(req, 8192), req); res.setHeader('Set-Cookie', result.setCookie); const {setCookie,...session}=result; return json(200,session); }
         const actor = auth.current(req);
         if (!actor) return json(401, { error: 'Authentication required.' });
+        const coverRoute = /^\/api\/lists\/([^/]+)\/cover$/.exec(url.pathname);
+        if (coverRoute) {
+          const listId = coverRoute[1];
+          if (req.method === 'GET') {
+            const image = store.covers.read(actor.id, listId);
+            res.setHeader('Content-Type', 'image/webp');
+            res.setHeader('Cache-Control', 'private, no-store');
+            return res.end(image);
+          }
+          if (req.method === 'PUT') {
+            checkOrigin(req);
+            store.covers.checkAccess(actor.id, listId);
+            const image = await readCoverUpload(req);
+            if (auth.current(req)?.id !== actor.id) throw new InputError('Authentication required.', 401);
+            store.covers.upload(actor.id, listId, image);
+            return json(200, store.get(actor.id));
+          }
+          return json(405, { error: 'Method not allowed.' });
+        }
         const getWorkspace = () => { if (auth.current(req)?.id !== actor.id) throw new InputError('Authentication required.',401); return store.get(actor.id); };
         if (req.method === 'GET' && url.pathname === '/api/sharing') return json(200,store.sharing(actor.id,url.searchParams.get('listId')));
         if (req.method === 'POST' && ['/api/sharing/invite','/api/sharing/revoke','/api/sharing/remove','/api/sharing/leave','/api/invitations/join','/api/invitations/preview'].includes(url.pathname)) {
@@ -114,7 +140,7 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
       else res.end();
     }
   });
-  server.on('close', () => { search.close(); auth.close(); store.close(); });
+  server.on('close', () => { coverWorker.close(); search.close(); auth.close(); store.close(); });
   return server;
 }
 export async function startServer(options = {}) {

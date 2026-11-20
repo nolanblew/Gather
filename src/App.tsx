@@ -1,11 +1,11 @@
 import { passwordHint, validNewPassword } from './passwordPolicy';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Archive, ArrowDown, ArrowLeft, ArrowUp, BookOpen, Check, ChevronDown, Copy, Gift, Home, Leaf, Lightbulb, List, Luggage, MoreHorizontal, Plus, Search, Palette, Settings, ShoppingBasket, Sparkles, Star, Tent, Trash2, Users, X } from 'lucide-react';
+import { Archive, ArrowDown, ArrowUp, BookOpen, Check, ChevronDown, Copy, Gift, Home, Leaf, Lightbulb, List, Luggage, MoreHorizontal, Plus, Search, Palette, Settings, ShoppingBasket, Sparkles, Star, Tent, Trash2, Users, X } from 'lucide-react';
 import Fuse from 'fuse.js';
 import AppearancePicker from './AppearancePicker';
 import { InstallBanner, InstallSettings } from './InstallGather';
 import { useAuth } from './auth';
-import { ApiError, getWorkspace, restoreWorkspace, runAction, validateBackup, searchLists, getSearchStatus } from './api';
+import { ApiError, getCapabilities, getWorkspace, restoreWorkspace, runAction, validateBackup, searchLists, getSearchStatus, uploadListCover } from './api';
 import { byPosition } from './itemOrder';
 import { orderGuard } from './organization';
 import Dialog from './Dialog';
@@ -54,6 +54,7 @@ function Badges({ list }: { list: GatherList }) { return <>{list.shared && <span
 export default function App() {
   const auth = useAuth();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const [features, setFeatures] = useState<string[]>([]);
   const [loadError, setLoadError] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -73,6 +74,13 @@ export default function App() {
   const [modal, setModal] = useState<Modal | null>(null);
   const [invitation, setInvitation] = useState(pendingInvitation);
   const [sharingBusy, setSharingBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void getCapabilities().then(capabilities => {
+      if (active && Array.isArray(capabilities.features)) setFeatures(capabilities.features);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
   useEffect(() => { const capture = () => { const token = pendingInvitation(); if (token) { setInvitation(token); setModal(null); } }; window.addEventListener('hashchange', capture); return () => window.removeEventListener('hashchange', capture); }, []);
   useEffect(() => {
     const resumeSearch = () => setSearchRetry(n => n + 1);
@@ -103,11 +111,11 @@ export default function App() {
     catch (e) { if (seq === sequence.current) { if (initial) setLoadError((e as Error).message); else setError('Could not refresh. Your saved lists are safe; retry when connected.'); } }
   }, []);
   useEffect(() => { void load(true); const refresh = () => { if (!document.hidden) void load(); }; window.addEventListener('focus', refresh); const timer = window.setInterval(refresh, 15000); return () => { ++sequence.current; clearInterval(timer); window.removeEventListener('focus', refresh); }; }, [load]);
-  const mutate: Mutation = async (type, payload) => {
+  const updateWorkspace = async (operation: () => Promise<Workspace>) => {
     if (busyRef.current) return null;
     if (!navigator.onLine) { setError("You're offline. Reconnect to save changes."); return null; }
     busyRef.current = true; setBusy(true); setError(''); setNotice(''); const seq = ++sequence.current;
-    try { const next = await runAction(type, payload); if (seq === sequence.current) { setWorkspace(next); setNotice('Changes saved'); } return next; }
+    try { const next = await operation(); if (seq === sequence.current) { setWorkspace(next); setNotice('Changes saved'); } return next; }
     catch (error) {
       const apiError = error instanceof ApiError ? error : null;
       const uncertain = !apiError || apiError.status >= 500;
@@ -123,12 +131,21 @@ export default function App() {
     }
     finally { busyRef.current = false; setBusy(false); }
   };
+  const mutate: Mutation = (type, payload) => updateWorkspace(() => runAction(type, payload));
   const selected = workspace?.lists.find(l => l.id === selectedId);
   const categories = useMemo(() => workspace?.categories.slice().sort(byPosition) || [], [workspace]);
   const go = (next: Destination) => { writeRoute({ destination: next, categoryId: null, query, searchAll, selectedId: null }, 'push', { gatherEditorEntry: false }); setDestination(next); setCategoryId(null); setSelectedId(null); setModal(null); };
   const backToCollection = () => { if (window.history.state?.gatherEditorEntry) window.history.back(); else { writeRoute({ destination, categoryId, query, searchAll, selectedId: null }, 'push', { gatherEditorEntry: false }); setSelectedId(null); } };
   const confirm = (title: string, message: string, action: string, payload: Payload, label: string) => setModal({ kind: 'confirm', title, message, action, payload, label });
-  const open = (id: string) => { writeRoute({ destination, categoryId, query, searchAll, selectedId: id }, 'push', { gatherEditorEntry: true }); setSelectedId(id); setError(''); window.scrollTo({ top: 0 }); };
+  const open = (id: string) => {
+    if (id === selectedId) return;
+    writeRoute({ destination, categoryId, query, searchAll, selectedId: id }, selected ? 'replace' : 'push', {
+      gatherEditorEntry: !selected || Boolean(window.history.state?.gatherEditorEntry),
+    });
+    setSelectedId(id);
+    setError('');
+    window.scrollTo({ top: 0 });
+  };
   const openCreated = (list: GatherList) => {
     const collection = { destination: list.isTemplate ? 'templates' as Destination : destination === 'favorites' && list.favorite ? 'favorites' as Destination : 'library' as Destination, categoryId: list.categoryId, query: '', searchAll: false, selectedId: null };
     writeRoute(collection, 'push', { gatherEditorEntry: false });
@@ -159,18 +176,35 @@ export default function App() {
     lists = results.flatMap(r => lookup.get(r.listId) ? [lookup.get(r.listId)!] : []);
   } else lists = lists.slice().sort(byPosition);
 
+  const sidebarLists = selected && !lists.some(list => list.id === selected.id) ? [selected, ...lists] : lists;
   return <div className="app-shell">
-    <aside className="sidebar"><a className="brand" href="#" onClick={e => { e.preventDefault(); go('library'); }}><Leaf size={38} strokeWidth={1.3} /><span>Gather</span></a><p className="tagline">Lists for everyday life.</p><p className="account-identity">Signed in as <strong>{auth.session.username}</strong></p><nav aria-label="Collections">{(['library', 'favorites', 'templates', 'archive'] as Destination[]).map(d => <button key={d} className={`nav-link ${destination === d ? 'active' : ''}`} onClick={() => go(d)}>{d === 'library' ? <BookOpen /> : d === 'favorites' ? <Star /> : d === 'templates' ? <Copy /> : <Archive />}<span>{d[0].toUpperCase() + d.slice(1)}</span></button>)}</nav><div className="sidebar-categories"><div className="eyebrow-row"><span className="eyebrow">Categories</span><button className="icon-button" aria-label="Manage categories" onClick={() => setModal({ kind: 'categories' })}><Plus size={17} /></button></div>{categories.map(c => <button key={c.id} className={`category-nav ${categoryId === c.id ? 'active' : ''}`} onClick={() => { const nextCategory = categoryId === c.id ? null : c.id; if (selectedId) writeRoute({ destination, categoryId: nextCategory, query, searchAll, selectedId: null }, 'push', { gatherEditorEntry: false }); setCategoryId(nextCategory); setSelectedId(null); }}><span className={`dot ${c.color}`} />{c.name}</button>)}</div><button className="nav-link appearance-link" onClick={() => setModal({ kind: "appearance" })}><Palette /><span>Appearance</span></button><button className="nav-link settings-link" onClick={() => setModal({ kind: 'settings' })}><Settings /><span>Settings & backup</span></button></aside>
-    <main>
-      <div className={`mobile-brand ${selected ? 'detail-mobile' : ''}`}>{selected ? <button className="text-button" onClick={backToCollection}><ArrowLeft size={18} /> Back</button> : <Leaf size={24} />}<span>Gather</span><button className="icon-button mobile-appearance" aria-label="Choose appearance" onClick={() => setModal({ kind: "appearance" })}><Palette size={21} /></button></div>
+    <aside className="sidebar">
+      <a className="brand" href="#" onClick={e => { e.preventDefault(); go('library'); }}><Leaf size={38} strokeWidth={1.3} /><span>Gather</span></a>
+      <p className="tagline">Lists for everyday life.</p><p className="account-identity">Signed in as <strong>{auth.session.username}</strong></p>
+      <nav aria-label="Collections">{(['library', 'favorites', 'templates', 'archive'] as Destination[]).map(d => <button key={d} className={`nav-link ${destination === d ? 'active' : ''}`} onClick={() => go(d)}>{d === 'library' ? <BookOpen /> : d === 'favorites' ? <Star /> : d === 'templates' ? <Copy /> : <Archive />}<span>{d[0].toUpperCase() + d.slice(1)}</span></button>)}</nav>
+      {selected && <nav className="sidebar-list-picker" aria-label="Lists in this collection">
+        <div className="eyebrow-row"><span className="eyebrow">Lists</span><button className="icon-button" aria-label="New list" onClick={() => setModal({ kind: 'list' })}><Plus size={17} /></button></div>
+        <div className="sidebar-list-picker-entries">
+          {sidebarLists.map(list => <button type="button" className="sidebar-list-link" key={list.id} aria-current={list.id === selected.id ? 'page' : undefined} onClick={() => open(list.id)}>
+            <ListIcon name={list.icon} size={17} /><span>{list.title}</span>
+          </button>)}
+        </div>
+      </nav>}
+      <div className="sidebar-categories"><div className="eyebrow-row"><span className="eyebrow">Categories</span><button className="icon-button" aria-label="Manage categories" onClick={() => setModal({ kind: 'categories' })}><Plus size={17} /></button></div>{categories.map(c => <button key={c.id} className={`category-nav ${categoryId === c.id ? 'active' : ''}`} onClick={() => { const nextCategory = categoryId === c.id ? null : c.id; if (selectedId) writeRoute({ destination, categoryId: nextCategory, query, searchAll, selectedId: null }, 'push', { gatherEditorEntry: false }); setCategoryId(nextCategory); setSelectedId(null); }}><span className={`dot ${c.color}`} />{c.name}</button>)}</div>
+      <button className="nav-link appearance-link" onClick={() => setModal({ kind: "appearance" })}><Palette /><span>Appearance</span></button><button className="nav-link settings-link" onClick={() => setModal({ kind: 'settings' })}><Settings /><span>Settings & backup</span></button>
+    </aside>
+    <main className={selected ? 'list-page-main' : undefined}>
+      {!selected && <div className="mobile-brand"><Leaf size={24} /><span>Gather</span><button className="icon-button mobile-appearance" aria-label="Choose appearance" onClick={() => setModal({ kind: "appearance" })}><Palette size={21} /></button></div>}
       <div className="save-status" aria-live="polite">{busy ? 'Saving…' : notice}</div>
-      {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={18} /></button></div>}
+      {error && !selected && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={18} /></button></div>}
       {!workspace ? <div className="loading-panel">{loadError ? <><h1>We couldn’t open your lists</h1><p>{loadError}</p><button className="primary" onClick={() => load(true)}>Retry</button></> : <><Leaf size={36} /><h1>Opening your lists…</h1></>}</div> : selected ? <ListEditor key={selected.id} list={selected} category={categories.find(category => category.id === selected.categoryId)}
         icon={<ListIcon name={selected.icon} size={34} />} badges={<Badges list={selected} />} organization={workspace.version >= 3} busy={busy} error={error} clearError={() => setError('')} mutate={mutate} back={backToCollection}
         savedView={listViews.current.get(selected.id)} updateView={view => listViews.current.set(selected.id, view)}
         edit={() => { setError(''); setModal({ kind: 'list', list: selected }); }} section={section => { setError(''); setModal({ kind: 'section', list: selected, section }); }}
         removeSection={section => confirm('Delete this section?', 'Its items will move to Unsectioned.', 'section.delete', { listId: selected.id, sectionId: section.id, ...orderGuard(selected) }, 'Delete section')}
-        clone={() => setModal({ kind: 'clone', list: selected })} listConfirm={action => listConfirm(selected, action)} share={() => { setError(''); setModal({ kind: 'sharing', list: selected }); }} /> : <>
+        clone={() => setModal({ kind: 'clone', list: selected })} listConfirm={action => listConfirm(selected, action)} share={() => { setError(''); setModal({ kind: 'sharing', list: selected }); }}
+        openAppearance={() => setModal({ kind: 'appearance' })} openSettings={() => setModal({ kind: 'settings' })}
+        uploadCover={features.includes('list-covers') ? async image => Boolean(await updateWorkspace(() => uploadListCover(selected.id, image))) : undefined} /> : <>
         <div className="library-toolbar"><label className="search-field"><Search size={21} /><input aria-label="Search lists and items" placeholder="Search lists, items and notes" maxLength={500} value={query} onChange={e => setQuery(e.target.value)} />{query && <button className="icon-button" aria-label="Clear search" onClick={() => setQuery('')}><X size={17} /></button>}</label><span className="today">{new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</span><button className="primary" onClick={() => setModal({ kind: 'list' })}><Plus size={20} />New list</button></div>
         {search && <div className="search-scope"><label>Search in <select aria-label="Search scope" value={searchAll ? "all" : "current"} onChange={e => setSearchAll(e.target.value === "all")}><option value="current">Current collection</option><option value="all">Entire workspace</option></select></label><span role="status">{searchBusy ? "Searching… · text matches available" : response?.provider !== "fuzzy" && response?.status === "ready" && !response.partial ? "Smart search · " + (response.provider === "local" ? "on this server" : "hosted") : response?.status === "ready" && response.partial ? "Smart search limited · text search covers all items" : response?.status === "warming" ? response.partial ? "Smart search preparing · text search covers all items" : "Text search · smart search starting" : searchFailed || response?.status === "degraded" ? "Text search · smart search unavailable" : "Text search"} · {searchAll ? "Entire workspace" : destinationLabels[destination]}</span></div>}
         <header className="page-heading"><h1>{destinationLabels[destination]}</h1><p>{destination === 'templates' ? 'Start a new list from a reusable template.' : destination === 'archive' ? 'Lists you’ve archived for yourself.' : destination === 'favorites' ? 'Lists you’ve marked as favorites.' : 'Your lists, all in one place.'}</p></header>
@@ -180,10 +214,10 @@ export default function App() {
         {destination !== 'templates' && <footer className="library-footer">Reuse a list for your next plan. <button className="text-button" onClick={() => go('templates')}>Browse templates <span aria-hidden="true">→</span></button></footer>}
       </>}
     </main>
-    <nav className="bottom-nav" aria-label="Main navigation"><button className={destination === 'library' || destination === 'favorites' ? 'active' : ''} onClick={() => go('library')}><BookOpen size={21} />Library</button><button className={destination === 'templates' ? 'active' : ''} onClick={() => go('templates')}><Copy size={21} />Templates</button><button className={destination === 'archive' ? 'active' : ''} onClick={() => setModal({ kind: 'more' })}><MoreHorizontal size={22} />More</button></nav>
+    {!selected && <nav className="bottom-nav" aria-label="Main navigation"><button className={destination === 'library' || destination === 'favorites' ? 'active' : ''} onClick={() => go('library')}><BookOpen size={21} />Library</button><button className={destination === 'templates' ? 'active' : ''} onClick={() => go('templates')}><Copy size={21} />Templates</button><button className={destination === 'archive' ? 'active' : ''} onClick={() => setModal({ kind: 'more' })}><MoreHorizontal size={22} />More</button></nav>}
     {modal && workspace && (!('list' in modal) || !modal.list || workspace.lists.some(l => l.id === modal.list!.id)) && (modal.kind !== 'confirm' || typeof modal.payload.listId !== 'string' || workspace.lists.some(l => l.id === modal.payload.listId)) && <Dialog title={modal.kind === 'list' ? modal.list ? 'List details' : 'New list' : modal.kind === 'section' ? modal.section ? 'Rename section' : 'Add a section' : modal.kind === 'clone' ? modal.list.isTemplate ? 'Start from this template' : 'Duplicate list' : modal.kind === 'confirm' ? modal.title : modal.kind === 'categories' ? 'Your categories' : modal.kind === 'appearance' ? 'Appearance' : modal.kind === 'settings' ? 'Settings & backup' : modal.kind === 'restore' ? 'Import private copies?' : modal.kind === 'sharing' ? modal.list.role === 'editor' ? 'People on this list' : 'Share this list' : 'More'} busy={busy || sharingBusy} close={() => setModal(null)}>
       <div className="dialog-error" role="alert">{error}</div>
-       {modal.kind === 'list' && <ListForm list={modal.list} categories={categories} defaultCategoryId={categoryId} defaultTemplate={destination === 'templates'} busy={busy} save={async payload => { const next = await mutate(modal.list ? 'list.update' : 'list.create', { ...(modal.list ? { listId: modal.list.id } : { favorite: destination === 'favorites' }), ...payload }); if (next) { setModal(null); if (!modal.list) { const created = next.lists.find(l => l.id === next.createdListId); if (created) openCreated(created); } } }} cancel={() => setModal(null)} />}
+       {modal.kind === 'list' && <ListForm list={modal.list} categories={categories} defaultCategoryId={categoryId} defaultTemplate={destination === 'templates'} generatedCovers={features.includes('generated-list-covers')} busy={busy} save={async payload => { const next = await mutate(modal.list ? 'list.update' : 'list.create', { ...(modal.list ? { listId: modal.list.id } : { favorite: destination === 'favorites' }), ...payload }); if (next) { setModal(null); if (!modal.list) { const created = next.lists.find(l => l.id === next.createdListId); if (created) openCreated(created); } } }} cancel={() => setModal(null)} />}
       {modal.kind === 'section' && <NameForm label="Section name" initial={modal.section?.title || ''} busy={busy} save={async title => { if (await mutate(modal.section ? 'section.update' : 'section.create', { listId: modal.list.id, ...(modal.section ? { sectionId: modal.section.id } : orderGuard(workspace.lists.find(list => list.id === modal.list.id) || modal.list)), title })) setModal(null); }} cancel={() => setModal(null)} />}
        {modal.kind === 'clone' && <><p className="dialog-copy">{modal.list.isTemplate ? 'Create a private working copy. People on the template won’t be added. Your template stays unchanged.' : modal.list.kind === 'notes' ? 'Create a private copy of every item and note. People on this list won’t be added.' : 'Create a private copy with all items unchecked. People on this list won’t be added.'}</p><NameForm label="New list name" initial={modal.list.isTemplate ? `${modal.list.title} — ${new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}` : `${modal.list.title} (copy)`} busy={busy} submitLabel={modal.list.isTemplate ? 'Start list' : 'Create copy'} save={async title => { const next = await mutate('list.clone', { listId: modal.list.id, title }); if (next) { const created = next.lists.find(l => l.id === next.createdListId); setModal(null); if (created) openCreated(created); } }} cancel={() => setModal(null)} /></>}
       {modal.kind === 'confirm' && <><p className="dialog-copy">{modal.message}</p><div className="dialog-actions"><button className="secondary" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className={modal.action === 'list.delete' || modal.action === 'section.delete' || modal.action === 'samples.remove' || modal.action === 'category.delete' ? 'danger' : 'primary'} disabled={busy} onClick={async () => { if (await mutate(modal.action, modal.payload) || modal.action === 'section.delete') setModal(null); }}>{busy ? 'Saving…' : modal.label}</button></div></>}
@@ -202,7 +236,7 @@ function ListCard({ list, category, match, busy, open, favorite, clone, restore,
   return <article className={`list-card ${list.color}`}><div className="card-top"><span className="card-icon"><ListIcon name={list.icon} size={32} /></span><div className="card-badges"><Badges list={list} /></div>{!list.isTemplate && !list.archived && <button className={`icon-button favorite ${list.favorite ? 'is-favorite' : ''}`} aria-label={`${list.favorite ? 'Unfavorite' : 'Favorite'} ${list.title}`} aria-pressed={list.favorite} disabled={busy} onClick={favorite}><Star size={21} fill={list.favorite ? 'currentColor' : 'none'} /></button>}</div><button className="card-open" onClick={open}><h2>{list.title}</h2><span className="card-category"><span className={`dot ${category?.color || list.color}`} />{category?.name || 'Uncategorized'}</span><p className={match ? 'match-preview' : ''}>{match ? <>{match.matchType === "semantic" ? "Related " : ""}{matchLabels[match.match.field] || "Content"}: {match.match.text}</> : list.description || (list.isTemplate ? 'Reusable template' : 'No description')}</p></button><div className="card-bottom">{list.isTemplate ? <><span>{list.items.length} items · reusable</span><button className="text-button" disabled={busy} onClick={clone}>Start list <span aria-hidden="true">→</span></button></> : list.kind === 'notes' ? <span>{list.items.length ? `${list.items.length} ${list.items.length === 1 ? 'item' : 'items'}` : 'No items yet'}</span> : <><span>{list.items.length ? `${done} of ${list.items.length} done` : 'No items yet'}</span><div className="progress-track"><div style={{ width: `${list.items.length ? done / list.items.length * 100 : 0}%` }} /></div></>}{list.archived && <div className="archive-actions"><button className="text-button" disabled={busy} onClick={restore}>Restore</button>{list.role !== 'editor' && <button className="icon-button" aria-label={`Delete ${list.title}`} disabled={busy} onClick={remove}><Trash2 size={18} /></button>}</div>}</div></article>;
 }
 
-function ListForm({ list, categories, defaultCategoryId, defaultTemplate, busy, save, cancel }: { list?: GatherList; categories: Category[]; defaultCategoryId: string | null; defaultTemplate: boolean; busy: boolean; save: (payload: Payload) => Promise<void>; cancel: () => void }) {
+function ListForm({ list, categories, defaultCategoryId, defaultTemplate, generatedCovers, busy, save, cancel }: { list?: GatherList; categories: Category[]; defaultCategoryId: string | null; defaultTemplate: boolean; generatedCovers: boolean; busy: boolean; save: (payload: Payload) => Promise<void>; cancel: () => void }) {
   const [title, setTitle] = useState(list?.title || '');
   const [description, setDescription] = useState(list?.description || '');
   const [categoryId, setCategoryId] = useState(list ? list.categoryId || '' : defaultCategoryId || '');
@@ -223,6 +257,7 @@ function ListForm({ list, categories, defaultCategoryId, defaultTemplate, busy, 
   }}>
     {list?.shared && <p className="dialog-copy">Title, description, icon and color change for everyone. Your category is personal.</p>}
     <label className="field">List name<input ref={titleRef} autoFocus required maxLength={200} value={title} onChange={event => { setTitle(event.target.value); setValidation(''); }} /></label>
+    {!list && generatedCovers && !template && <p className="field-help cover-generation-note">Gather may send the list name and description to OpenAI about 30 seconds after creation to generate a cover.</p>}
     {validation && <p className="field-error" role="alert">{validation}</p>}
     {!list && <button className="text-button form-options-button" type="button" aria-expanded={moreOptions} onClick={() => setMoreOptions(!moreOptions)}><ChevronDown size={17} />More options</button>}
     {moreOptions && <div className="list-form-options">
