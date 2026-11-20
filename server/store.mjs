@@ -3,8 +3,9 @@ import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { InputError, bool, fail, id, object, string } from './input.mjs';
-import { WORKSPACE_VERSION, editAssignments, editDictionary, guardOrder, mapContentIds, orderToken, readItemOrganization, readOrganization, remapListContent } from './organization.mjs';
+import { WORKSPACE_VERSION, reorderGroups, bulkAdd, editAssignments, editDictionary, guardOrder, mapContentIds, orderToken, readItemOrganization, readOrganization, remapListContent } from './organization.mjs';
 import { seedWorkspace } from './seed.mjs';
+import { createCoverStore } from './covers.mjs';
 
 export { InputError, WORKSPACE_VERSION };
 export const WORKSPACE_BYTE_LIMIT = 5 * 1024 * 1024;
@@ -30,8 +31,8 @@ const listFields = { title: v => string(v, 'Title', 200, true), description: v =
 export function validateWorkspace(input, { boundInput = true } = {}) {
   object(input);
   if (boundInput) boundedDocument(input);
-  if (![1, 2, WORKSPACE_VERSION].includes(input.version) || !Array.isArray(input.categories) || !Array.isArray(input.lists)) fail('Expected a version 1, 2, or 3 workspace with categories and lists.');
-  const hasOrganization = input.version === WORKSPACE_VERSION;
+  if (![1, 2, 3, WORKSPACE_VERSION].includes(input.version) || !Array.isArray(input.categories) || !Array.isArray(input.lists)) fail('Expected a supported Gather workspace with categories and lists.');
+  const hasOrganization = input.version >= 3;
   if (input.categories.length > 100 || input.lists.length > 1000) fail('Workspace exceeds category or list limit.');
   const ids = new Set();
   const unique = value => { id(value); if (ids.has(value)) fail('IDs must be unique throughout the workspace.'); ids.add(value); return value; };
@@ -63,9 +64,38 @@ export function validateWorkspace(input, { boundInput = true } = {}) {
 
 const structuralActions = new Set(['item.create', 'item.delete', 'item.move', 'section.create', 'section.delete', 'section.move']);
 
+function selectedItems(list, ids) {
+  if (!Array.isArray(ids) || !ids.length || ids.length > 5000) fail('Choose items from this list.');
+  const selected = new Set(ids.map(id));
+  if (selected.size !== ids.length) fail('Choose each item only once.');
+  const byId = new Map(list.items.map(item => [item.id, item]));
+  return ids.map(id => byId.get(id) ?? fail('An item is no longer available. Review your selection.'));
+}
+
+function reorderVisible(list, payload) {
+  guardOrder(list, payload, true);
+  const items = selectedItems(list, payload.itemIds);
+  const first = items[0];
+  if (items.some(item => item.sectionId !== first.sectionId)) fail('Move items within the same section.');
+  if (list.kind === 'checklist' && !list.numbered && !list.isTemplate && items.some(item => item.checked !== first.checked)) {
+    throw new InputError('Completion changed. Review the list and try again.', 409, 'ORDER_CHANGED');
+  }
+  const visible = new Set(items);
+  const siblings = list.items.filter(item => item.sectionId === first.sectionId).sort((a, b) => a.position - b.position);
+  let next = 0;
+  siblings.forEach((item, index) => {
+    const occupant = visible.has(item) ? items[next++] : item;
+    occupant.position = index;
+  });
+}
+
 export function applyAction(workspace, action) {
   object(action); object(action.payload);
-  const p = action.payload, type = string(action.type, 'Action type', 80, true), now = new Date().toISOString();
+  const p = action.payload, now = new Date().toISOString();
+  let type = string(action.type, 'Action type', 80, true);
+  // Distinct actions keep new clients from silently losing people on an older server.
+  if (type === 'item.createWithPeople') type = 'item.create';
+  if (type === 'item.updateWithPeople') type = 'item.update';
   if (type === 'samples.remove') { workspace.lists = workspace.lists.filter(l => !l.isSample); normalize(workspace.lists); return; }
   if (type === 'category.create') { if (workspace.categories.length >= 100) fail('Category limit reached.'); workspace.categories.push({ id: randomUUID(), name: string(p.name, 'Category name', 80, true), color: color(p.color ?? 'sage'), position: appendPosition(workspace.categories) }); return; }
   if (type.startsWith('category.')) {
@@ -124,6 +154,9 @@ export function applyAction(workspace, action) {
     l.items.push(i);
     receipt = { createdItemId: i.id };
   }
+  else if (type === 'group.reorder') reorderGroups(l, p);
+  else if (type === 'item.bulkAdd') bulkAdd(l, p, selectedItems(l, p.itemIds));
+  else if (type === 'item.reorderVisible') reorderVisible(l, p);
   else if (type.startsWith('item.')) {
     const i = find(l.items, id(p.itemId), 'Item');
     if (type === 'item.delete') {
@@ -186,7 +219,7 @@ export function createStore(dataDir) {
 
 // User workspaces contain canonical owned content; per-user list presentation and
 // membership live separately so one editor cannot reorganize another's library.
-export function createUserStore(dataDir, { legacyOwnerId = null, username = () => 'Gather user' } = {}) {
+export function createUserStore(dataDir, { legacyOwnerId = null, username = () => 'Gather user', generateCovers = false } = {}) {
   mkdirSync(dataDir,{recursive:true});
   const db=new DatabaseSync(join(dataDir,'gather.sqlite'));
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
@@ -242,12 +275,12 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
         }
         recordMigration.run('singleton-owner-v1');
       }
-      if(!migrationComplete.get('workspace-v3')) {
+      if(!migrationComplete.get('workspace-v4')) {
         for(const {user_id:userId} of db.prepare('SELECT user_id FROM user_workspaces').all()) {
           const workspace=raw(userId);
           if(workspace.version!==WORKSPACE_VERSION) write.run(userId,boundedDocument(validateWorkspace(workspace)));
         }
-        recordMigration.run('workspace-v3');
+        recordMigration.run('workspace-v4');
       }
     });
   } catch(error) {db.close();throw error;}
@@ -257,6 +290,7 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
     if(!row || (row.owner_id!==userId && !member.get(listId,userId))) throw new InputError('List not found or access has ended.',404);
     return row.owner_id;
   }
+  const covers = createCoverStore(db, { access, raw, transaction });
   function projection(userId) {
     ensure(userId);
     const own=raw(userId),lists=own.lists.map(l=>({...l,role:'owner',ownerUsername:username(userId)}));
@@ -275,7 +309,11 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
   }
   function get(userId) {
     const workspace=projection(userId);
-    for(const list of workspace.lists) list.orderToken=orderToken(list);
+    for(const list of workspace.lists) {
+      list.orderToken=orderToken(list);
+      const coverId=covers.id(list.id);
+      if (coverId) list.coverId=coverId;
+    }
     return workspace;
   }
   function persistProjection(userId,workspace,editedOwner=null,editedListId=null) {
@@ -321,6 +359,11 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
         // A clone of an editor's list is owned solely by the copying user.
       }
       persistProjection(userId,workspace,editedOwner,p.listId);
+      if (result?.createdListId) {
+        const active = !workspace.lists.find(list => list.id === result.createdListId).archived;
+        covers.onCreate(result.createdListId, type === 'list.clone' ? p.listId : null, generateCovers && active);
+      }
+      if (type === 'list.update' && editedOwner === userId && p.archived === true) covers.cancel(p.listId);
       return result;
     });
     return {...get(userId),...receipt};
@@ -361,7 +404,7 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
     return row;
   }
   return {
-    ensure,get,action,import:importCopies,export:exportOwned,
+    ensure,get,action,covers,import:importCopies,export:exportOwned,
     health:()=>db.prepare('SELECT 1').get(),
     sharing,
     invite(userId,listId) {

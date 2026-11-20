@@ -1,7 +1,7 @@
 """Deploy a verified accounts release on the LAN host, preserving a rollback volume.
 
 Invoke with release directory, image tag, and a NEW volume name. The optional
-organization-v3 mode permits only the workspace version migration. Only Gather
+organization migration modes permit only the corresponding workspace version change. Only Gather
 is stopped/recreated. The original volume is never mounted writable by the new
 release.
 """
@@ -44,9 +44,13 @@ def data_fingerprint(volume, runtime_image):
         runtime_image, 'node', '/verification/inspect-release-data.mjs', '/app/data', mode))
 
 
+organization_versions = {'organization-v3': (2, 3), 'organization-v4': (3, 4)}
+
+
 def validate_migration(before, after):
-    if mode == 'organization-v3':
-        for snapshot, version, migrated in [(before, '2', False), (after, '3', True)]:
+    if mode in organization_versions:
+        previous_version, target_version = organization_versions[mode]
+        for snapshot, version, migrated in [(before, str(previous_version), False), (after, str(target_version), True)]:
             versions = snapshot.get('workspaceVersions', {})
             if versions != {version: snapshot['gather.sqlite']['tables']['user_workspaces']['count']}:
                 raise RuntimeError(f'Unexpected workspace versions before deployment validation ({version} expected)')
@@ -64,17 +68,18 @@ def validate_migration(before, after):
 def verify_capabilities(capabilities):
     if capabilities.get('apiVersion') != 1 or 'bearer' not in capabilities.get('authentication', []):
         raise RuntimeError('Native API capabilities are missing')
-    if mode == 'organization-v3' and (
-        capabilities.get('workspaceVersion') != 3 or
-        not {'list-organization', 'numbered-lists', 'guarded-order'} <= set(capabilities.get('features', []))
-    ):
-        raise RuntimeError('Organization capabilities are missing')
+    if mode in organization_versions:
+        features = {'list-organization', 'numbered-lists', 'guarded-order'}
+        if mode == 'organization-v4':
+            features.update({'multiple-recipients', 'bulk-assignments', 'visible-item-order'})
+        if capabilities.get('workspaceVersion') != organization_versions[mode][1] or not features <= set(capabilities.get('features', [])):
+            raise RuntimeError('Organization capabilities are missing')
 
 
 release = Path(sys.argv[1]).resolve()
 image, new_volume = sys.argv[2:4]
 mode = sys.argv[4] if len(sys.argv) == 5 else 'accounts'
-if mode not in {'accounts', 'organization-v3'} or len(sys.argv) > 5:
+if (mode != 'accounts' and mode not in organization_versions) or len(sys.argv) > 5:
     raise SystemExit('Unexpected validation mode')
 if release.parent != Path('/home/nolan/dockers/gather/releases'):
     raise SystemExit('Unexpected release directory')
@@ -112,7 +117,7 @@ expected_image = json.loads(run('docker', 'image', 'inspect', image))[0]['Id']
 if not (release / 'inspect-release-data.mjs').is_file():
     raise SystemExit('Missing data preservation verifier')
 run('docker', 'volume', 'create', new_volume)
-backup = release / ('data-before-organization.tar' if mode == 'organization-v3' else 'data-before-accounts.tar')
+backup = release / ('data-before-organization.tar' if mode in organization_versions else 'data-before-accounts.tar')
 backup.touch(mode=0o600, exist_ok=False)
 stopped = False
 publishing = False
@@ -179,7 +184,7 @@ try:
     temporary.replace(current)
 except Exception:
     if stopped:
-        if publishing and mode == 'organization-v3':
+        if publishing and mode in organization_versions:
             candidate = next((c for c in inventory() if c['Image'] == expected_image and
                               (c['Config'].get('Labels') or {}).get('com.docker.compose.project') == 'gather-lan'), None)
             if candidate and candidate['State']['Running']:

@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const root = process.argv[2] || '/app/data';
-const organization = process.argv[3] === 'organization-v3';
+const migration = { 'organization-v3': 'workspace-v3', 'organization-v4': 'workspace-v4' }[process.argv[3]];
+const organization = Boolean(migration);
 // A cleanly stopped WAL database can require a new shared-memory sidecar even
 // when opened read-only. Inspect a temporary copy so the source mount stays
 // genuinely read-only. Retain a WAL when present; never copy only its main DB.
@@ -49,8 +50,8 @@ for (const filename of ['account.sqlite', 'workspace.sqlite', 'gather.sqlite']) 
       });
     }
     if (organization && filename === 'gather.sqlite' && name === 'user_migrations') {
-      report.organizationMigration = rows.some(row => row.name === 'workspace-v3');
-      rows = rows.filter(row => row.name !== 'workspace-v3');
+      report.organizationMigration = rows.some(row => row.name === migration);
+      rows = rows.filter(row => row.name !== migration);
     }
     rows = rows.map(row => JSON.stringify(row)).sort();
     report[filename].tables[name] = { count: rows.length, sha256: createHash('sha256').update(JSON.stringify(rows)).digest('hex') };

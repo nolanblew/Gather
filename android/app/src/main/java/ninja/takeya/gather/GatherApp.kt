@@ -5,6 +5,7 @@ package ninja.takeya.gather
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -22,8 +23,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.*
 import androidx.compose.material.icons.outlined.*
@@ -40,7 +39,6 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.*
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
@@ -48,7 +46,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.layout.FoldingFeature
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -66,7 +63,11 @@ sealed interface Editor {
 
     data class SectionForm(val list: GatherList, val section: Section? = null) : Editor
 
-    data class Filters(val list: GatherList, val filter: ListFilter) : Editor
+    data class Filters(val list: GatherList, val filter: ListFilter, val view: Boolean = false) : Editor
+
+    data class BulkAdd(val list: GatherList, val itemIds: Set<String>, val places: Boolean) : Editor
+
+    data class GroupOrder(val listId: String, val grouping: ItemGrouping) : Editor
 
     data class Definitions(val list: GatherList) : Editor
 
@@ -95,6 +96,15 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
     var settings by model.ui::settings
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val coverPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { image ->
+        val listId = model.ui.pendingCoverListId
+        model.ui.pendingCoverListId = null
+        if (image != null && listId != null) model.uploadListCover(listId, image)
+    }
+    val chooseCover: (String) -> Unit = { listId ->
+        model.ui.pendingCoverListId = listId
+        coverPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+    }
     BackHandler(
         enabled =
             state.username != null &&
@@ -102,10 +112,19 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                 confirm == null &&
                 (state.selectedId != null || settings)
     ) {
-        if (state.selectedId != null) model.select(null)
-        else {
-            settings = false
-            model.collection("library")
+        val listId = state.selectedId
+        when {
+            listId != null && model.ui.reorderListId == listId -> model.ui.reorderListId = null
+            listId != null && model.ui.itemSelections.containsKey(listId) -> model.ui.itemSelections.remove(listId)
+            listId != null && (model.ui.itemSearchListId == listId || !model.ui.itemQueries[listId].isNullOrBlank()) -> {
+                model.ui.itemSearchListId = null
+                model.ui.itemQueries.remove(listId)
+            }
+            listId != null -> model.select(null)
+            else -> {
+                settings = false
+                model.collection("library")
+            }
         }
     }
     var importing by remember { mutableStateOf<String?>(null) }
@@ -229,24 +248,8 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                             onNewList = { editor = Editor.ListForm() },
                             topBar = {
                                 Column {
-                                    TopAppBar(
-                                        title = {
-                                            if (state.selected != null)
-                                                Text(
-                                                    "List",
-                                                    style = MaterialTheme.typography.titleMedium,
-                                                )
-                                            else Brand()
-                                        },
-                                        navigationIcon = {
-                                            if (state.selected != null)
-                                                IconButton(onClick = { model.select(null) }) {
-                                                    Icon(
-                                                        Icons.AutoMirrored.Outlined.ArrowBack,
-                                                        "Back to library",
-                                                    )
-                                                }
-                                        },
+                                    if (state.selected == null) TopAppBar(
+                                        title = { Brand() },
                                         actions = {
                                             AnimatedVisibility(
                                                 visible = state.busy,
@@ -265,16 +268,6 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                                             ) {
                                                 Icon(Icons.Outlined.Refresh, "Refresh lists")
                                             }
-                                            if (state.selected != null)
-                                                IconButton(
-                                                    onClick = {
-                                                        editor = Editor.Share(state.selected!!)
-                                                        model.loadSharing(state.selected!!.id)
-                                                    },
-                                                    enabled = writable,
-                                                ) {
-                                                    Icon(Icons.Outlined.Group, "Share list")
-                                                }
                                         },
                                         colors =
                                             TopAppBarDefaults.topAppBarColors(
@@ -357,7 +350,7 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                                                     model,
                                                     { editor = it },
                                                     { confirm = it },
-                                                    compactHeader = true,
+                                                    { chooseCover(list.id) },
                                                 )
                                             else WorkspaceOverview(page.state, model)
                                         }
@@ -398,6 +391,7 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                                                         model,
                                                         { editor = it },
                                                         { confirm = it },
+                                                        { chooseCover(list.id) },
                                                     )
                                                 }
                                             page.key == "settings" ->
@@ -1003,632 +997,6 @@ fun ListCard(
 }
 
 @Composable
-fun DetailScreen(
-    list: GatherList,
-    state: GatherState,
-    writable: Boolean,
-    model: GatherViewModel,
-    edit: (Editor) -> Unit,
-    confirm: (Confirmation) -> Unit,
-    compactHeader: Boolean = false,
-) {
-    var more by remember { mutableStateOf(false) }
-    var lastPlaces by remember(list.id) { mutableStateOf(list.places) }
-    var lastRecipients by remember(list.id) { mutableStateOf(list.recipients) }
-    val ui = model.ui
-    val filter = ui.filters[list.id] ?: ListFilter()
-    val showDetails = ui.hiddenDetails[list.id] != true
-    val hiddenSaved = ui.hiddenSavedItems[list.id]
-    val capture = ui.itemCapture[list.id].orEmpty()
-    val organization = state.workspace.version >= 3
-    val canFilter =
-        filter.active || list.usesPlaces || list.usesRecipients ||
-            (list.kind == "checklist" && list.checkedCount > 0)
-    val scroll = ui.listScroll("detail:${list.id}")
-    val canonical = remember(list) { list.canonicalItems() }
-    val ordinals = remember(list.numbered, canonical) {
-        if (list.numbered) canonical.mapIndexed { index, item -> item.id to index + 1 }.toMap()
-        else emptyMap()
-    }
-    val visibleItems = remember(canonical, filter) { canonical.filter(filter::matches) }
-    val groups = visibleItems.groupBy { it.sectionId }
-    val unsectioned = groups[null].orEmpty()
-    val sections = list.sections.sortedBy { it.position }.filter {
-        !filter.active || groups[it.id].orEmpty().isNotEmpty()
-    }
-    val focusManager = LocalFocusManager.current
-    val openFilter = { draft: ListFilter -> edit(Editor.Filters(list, draft)) }
-    fun clearFilters() {
-        ui.filters.remove(list.id)
-        ui.hiddenSavedItems.remove(list.id)
-    }
-    LaunchedEffect(list.places, list.recipients, list.kind, filter) {
-        val removedPlace = filter.place?.takeIf { list.placeFilterLabel(it) == null }
-        val removedPerson = filter.person?.takeIf { id ->
-            id != FILTER_UNSET && list.recipients.none { it.id == id }
-        }
-        val reconciled = filter.copy(
-            place = filter.place.takeIf { removedPlace == null },
-            person = filter.person.takeIf { removedPerson == null },
-            notDone = filter.notDone && list.kind == "checklist",
-        )
-        if (reconciled != filter) {
-            if (reconciled.active) ui.filters[list.id] = reconciled else ui.filters.remove(list.id)
-        }
-        removedPlace?.let { id ->
-            val label = lastPlaces.find { it.id == id }?.label ?: "The place"
-            model.report("$label was removed. The filter was cleared.")
-        }
-        removedPerson?.let { id ->
-            val label = lastRecipients.find { it.id == id }?.name ?: "The person"
-            model.report("$label was removed. The filter was cleared.")
-        }
-        lastPlaces = list.places
-        lastRecipients = list.recipients
-    }
-    val revealItem = ui.itemToReveal[list.id]
-    LaunchedEffect(revealItem, visibleItems, filter) {
-        if (revealItem == null || filter.active) return@LaunchedEffect
-        val target = visibleItems.find { it.id == revealItem }
-        if (target != null) {
-            var index = 2 + if (hiddenSaved == null) 0 else 1
-            if (target.sectionId == null) index += unsectioned.indexOf(target)
-            else {
-                index += unsectioned.size
-                for (section in sections) {
-                    index++
-                    val content = groups[section.id].orEmpty()
-                    if (section.id == target.sectionId) {
-                        index += content.indexOf(target)
-                        break
-                    }
-                    index += maxOf(content.size, 1)
-                }
-            }
-            scroll.scrollToItem(index)
-        }
-        ui.itemToReveal.remove(list.id)
-    }
-    val addItem = {
-        if (capture.isNotBlank() && writable) {
-            focusManager.clearFocus()
-            if (filter.place != null || filter.person != null) {
-                edit(Editor.ItemForm(list, initialText = capture, filter = filter))
-            } else {
-                model.action("item.create", list.orderedPayload("text" to capture.trim()), onSuccess = {
-                    ui.itemCapture.remove(list.id)
-                    model.showSavedItem(list.id, null)
-                })
-            }
-        }
-    }
-    val progress by
-        animateFloatAsState(
-            if (list.items.isEmpty()) 0f else list.checkedCount.toFloat() / list.items.size,
-            animationSpec = GatherMotion.standard(),
-            label = "Checklist progress",
-        )
-    LazyColumn(
-        Modifier.widthIn(max = 840.dp).fillMaxSize(),
-        state = scroll,
-        contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 4.dp, bottom = 30.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        item {
-            Surface(
-                color = tint(list.color),
-                shape = RoundedCornerShape(28.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(
-                    Modifier.padding(if (compactHeader) 14.dp else 22.dp),
-                    verticalArrangement = Arrangement.spacedBy(if (compactHeader) 6.dp else 12.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            listIcon(list.icon),
-                            null,
-                            Modifier.size(if (compactHeader) 24.dp else 32.dp),
-                        )
-                        if (compactHeader) {
-                            Spacer(Modifier.width(10.dp))
-                            Text(
-                                list.title,
-                                Modifier.weight(1f),
-                                style = MaterialTheme.typography.titleLarge,
-                            )
-                        } else Spacer(Modifier.weight(1f))
-                        IconButton(
-                            onClick = {
-                                model.action(
-                                    "list.update",
-                                    payload("listId" to list.id, "favorite" to !list.favorite),
-                                )
-                            },
-                            enabled = writable,
-                        ) {
-                            Icon(
-                                if (list.favorite) Icons.Outlined.Star
-                                else Icons.Outlined.StarOutline,
-                                if (list.favorite) "Remove from favorites" else "Add to favorites",
-                            )
-                        }
-                        Box {
-                            IconButton(onClick = { more = true }) {
-                                Icon(Icons.Outlined.MoreHoriz, "List options")
-                            }
-                            DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("List details") },
-                                    onClick = {
-                                        more = false
-                                        edit(Editor.ListForm(list))
-                                    },
-                                    leadingIcon = { Icon(Icons.Outlined.Edit, null) },
-                                    enabled = writable,
-                                )
-                                if (organization && list.owner)
-                                    DropdownMenuItem(
-                                        text = { Text("Number items") },
-                                        onClick = {
-                                            more = false
-                                            model.action(
-                                                "list.update",
-                                                payload(
-                                                    "listId" to list.id,
-                                                    "numbered" to !list.numbered,
-                                                    "expectedOrderToken" to list.orderToken,
-                                                ),
-                                            )
-                                        },
-                                        trailingIcon = { if (list.numbered) Icon(Icons.Outlined.Check, "On") },
-                                        enabled = writable,
-                                    )
-                                if (canFilter)
-                                    DropdownMenuItem(
-                                        text = { Text("Filter this list") },
-                                        onClick = {
-                                            more = false
-                                            openFilter(filter)
-                                        },
-                                    )
-                                if (filter.active && list.items.isNotEmpty())
-                                    DropdownMenuItem(
-                                        text = { Text("Edit order") },
-                                        onClick = {
-                                            more = false
-                                            confirm(
-                                                Confirmation("Edit order", "Show all items to edit their order.", "Show all items") {
-                                                    val anchor = visibleItems.firstOrNull()
-                                                    clearFilters()
-                                                    if (anchor != null) ui.itemToReveal[list.id] = anchor.id
-                                                }
-                                            )
-                                        },
-                                    )
-                                if (list.hasItemDetails)
-                                    DropdownMenuItem(
-                                        text = { Text(if (showDetails) "Hide item details" else "Show item details") },
-                                        onClick = {
-                                            more = false
-                                            ui.hiddenDetails[list.id] = showDetails
-                                        },
-                                    )
-                                if (organization && (list.places.isNotEmpty() || list.recipients.isNotEmpty()))
-                                    DropdownMenuItem(
-                                        text = { Text("Manage places and people") },
-                                        onClick = {
-                                            more = false
-                                            edit(Editor.Definitions(list))
-                                        },
-                                        enabled = writable,
-                                    )
-                                DropdownMenuItem(
-                                    text = { Text("Make a private copy") },
-                                    onClick = {
-                                        more = false
-                                        model.action(
-                                            "list.clone",
-                                            payload("listId" to list.id),
-                                            true,
-                                        )
-                                    },
-                                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
-                                    enabled = writable,
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Add section") },
-                                    onClick = {
-                                        more = false
-                                        edit(Editor.SectionForm(list))
-                                    },
-                                    leadingIcon = { Icon(Icons.Outlined.Add, null) },
-                                    enabled = writable,
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            if (list.archived) "Restore to library"
-                                            else "Archive for me"
-                                        )
-                                    },
-                                    onClick = {
-                                        more = false
-                                        if (list.archived)
-                                            model.action(
-                                                "list.update",
-                                                payload("listId" to list.id, "archived" to false),
-                                            )
-                                        else
-                                            confirm(
-                                                Confirmation(
-                                                    "Archive this list for you?",
-                                                    "You can restore it from Archive. Others can still see it in their library.",
-                                                    "Archive",
-                                                ) {
-                                                    model.action(
-                                                        "list.update",
-                                                        payload(
-                                                            "listId" to list.id,
-                                                            "archived" to true,
-                                                        ),
-                                                    )
-                                                }
-                                            )
-                                    },
-                                    leadingIcon = { Icon(Icons.Outlined.Archive, null) },
-                                    enabled = writable,
-                                )
-                                if (list.owner)
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                "Delete list",
-                                                color = MaterialTheme.colorScheme.error,
-                                            )
-                                        },
-                                        onClick = {
-                                            more = false
-                                            confirm(
-                                                Confirmation(
-                                                    if (list.shared)
-                                                        "Delete this list for everyone?"
-                                                    else "Delete this list?",
-                                                    if (list.shared)
-                                                        "Everyone will lose access. This can’t be undone."
-                                                    else
-                                                        "All its items and notes will be permanently deleted. This can’t be undone.",
-                                                    "Delete",
-                                                    true,
-                                                ) {
-                                                    model.action(
-                                                        "list.delete",
-                                                        payload("listId" to list.id),
-                                                    )
-                                                }
-                                            )
-                                        },
-                                        leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
-                                        enabled = writable,
-                                    )
-                                else
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                "Leave shared list",
-                                                color = MaterialTheme.colorScheme.error,
-                                            )
-                                        },
-                                        onClick = {
-                                            more = false
-                                            confirm(
-                                                Confirmation(
-                                                    "Leave this list?",
-                                                    "Your edits stay with the list. You’ll need a new invitation to return.",
-                                                    "Leave",
-                                                    true,
-                                                ) {
-                                                    model.sharingAction("leave", list.id)
-                                                }
-                                            )
-                                        },
-                                        enabled = writable,
-                                    )
-                            }
-                        }
-                    }
-                    if (!compactHeader)
-                        Text(list.title, style = MaterialTheme.typography.headlineLarge)
-                    if (list.description.isNotBlank())
-                        ListDescription(
-                            list.description,
-                            if (compactHeader) 2 else 3,
-                            style =
-                                if (compactHeader) MaterialTheme.typography.bodyMedium
-                                else MaterialTheme.typography.bodyLarge,
-                        )
-                    if (list.shared)
-                        Text(
-                            if (list.owner) "Shared · You own this list" else "Shared · Owned by ${list.ownerUsername}",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    if (list.kind == "checklist" && !list.isTemplate && list.items.isNotEmpty()) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                "${list.checkedCount} of ${list.items.size} complete",
-                                modifier = Modifier.weight(1f),
-                                style =
-                                    if (compactHeader) MaterialTheme.typography.labelMedium
-                                    else MaterialTheme.typography.labelLarge,
-                            )
-                            if (list.checkedCount > 0 && !list.archived)
-                                TextButton(
-                                    onClick = {
-                                        confirm(
-                                            Confirmation(
-                                                "Reset checkmarks?",
-                                                if (list.shared)
-                                                    "This resets checkmarks for everyone."
-                                                else
-                                                    "This clears checkmarks and keeps every item, quantity, and note.",
-                                                "Reset checkmarks",
-                                            ) {
-                                                model.action(
-                                                    "list.reset",
-                                                    payload("listId" to list.id),
-                                                )
-                                            }
-                                        )
-                                    },
-                                    enabled = writable,
-                                    contentPadding =
-                                        PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                ) {
-                                    Text(
-                                        "Reset checkmarks",
-                                        style =
-                                            if (compactHeader) MaterialTheme.typography.labelMedium
-                                            else MaterialTheme.typography.labelLarge,
-                                    )
-                                }
-                        }
-                        if (list.items.isNotEmpty())
-                            LinearProgressIndicator(
-                                progress = { progress },
-                                modifier =
-                                    Modifier.fillMaxWidth()
-                                        .height(if (compactHeader) 4.dp else 5.dp)
-                                        .clip(CircleShape),
-                                trackColor = MaterialTheme.colorScheme.surface.copy(alpha = .6f),
-                            )
-                    }
-                    if (list.isTemplate) {
-                        Text(
-                            "Start a separate private copy with unchecked items. People on this template won’t have access to the copy.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Button(
-                            onClick = {
-                                val date =
-                                    LocalDate.now()
-                                        .format(DateTimeFormatter.ofPattern("MMM d, yyyy"))
-                                model.action(
-                                    "list.clone",
-                                    payload(
-                                        "listId" to list.id,
-                                        "title" to "${list.title} — $date".take(200),
-                                    ),
-                                    true,
-                                )
-                            },
-                            enabled = writable,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Icon(Icons.Outlined.PlayArrow, null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Start list")
-                        }
-                    }
-                }
-            }
-        }
-        if (filter.active)
-            item(key = "active-filters") {
-                Column {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = { openFilter(filter) }, modifier = Modifier.weight(1f)) {
-                            Text(filter.summary(list), modifier = Modifier.fillMaxWidth())
-                        }
-                        TextButton(onClick = ::clearFilters) { Text("Clear") }
-                    }
-                    if (filter.place != null && filter.place != FILTER_UNSET) {
-                        val unassigned = list.items.count { it.availability.mode == "unassigned" }
-                        if (unassigned > 0)
-                            TextButton(onClick = { openFilter(filter.copy(place = FILTER_UNSET)) }) {
-                                Text("$unassigned without a place")
-                            }
-                    }
-                }
-            }
-        if (hiddenSaved != null)
-            item(key = "saved-hidden-item") {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Item saved. It isn't shown with these filters.", Modifier.weight(1f))
-                    TextButton(onClick = {
-                        clearFilters()
-                        ui.itemToReveal[list.id] = hiddenSaved
-                    }) { Text("View item") }
-                }
-            }
-        item(key = "capture-item") {
-            Row(
-                Modifier.fillMaxWidth().padding(top = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    capture,
-                    { ui.itemCapture[list.id] = it.take(500) },
-                    modifier = Modifier.weight(1f).testTag("quick-item-text"),
-                    label = { Text("Add item") },
-                    singleLine = true,
-                    enabled = writable,
-                    shape = RoundedCornerShape(16.dp),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { addItem() }),
-                )
-                Button(
-                    onClick = addItem,
-                    enabled = writable && capture.isNotBlank(),
-                    modifier = Modifier.testTag("quick-item-add"),
-                ) {
-                    Text("Add")
-                }
-            }
-        }
-        if (filter.active && visibleItems.isEmpty())
-            item {
-                Text("No items match these filters.", Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
-                TextButton(onClick = ::clearFilters) { Text("Clear filters") }
-            }
-        else if (list.items.isEmpty())
-            item {
-                Text("Add your first item.", Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
-            }
-        items(unsectioned, key = { it.id }) { item ->
-            ItemRow(
-                list,
-                item,
-                writable,
-                {
-                    if (list.kind == "checklist")
-                        model.action(
-                            "item.update",
-                            payload(
-                                "listId" to list.id,
-                                "itemId" to item.id,
-                                "checked" to !item.checked,
-                            ),
-                        )
-                },
-                { edit(Editor.ItemForm(list, item)) },
-                ordinal = ordinals[item.id],
-                description = item.note.takeIf { showDetails }.orEmpty(),
-                detail = if (showDetails) list.itemMetadata(item, filter) else "",
-                modifier =
-                    Modifier.animateItem(
-                        fadeInSpec = GatherMotion.quick(),
-                        placementSpec = GatherMotion.standard(),
-                        fadeOutSpec = GatherMotion.quick(),
-                    ),
-            )
-        }
-        sections.forEach { section ->
-                item(key = "section-${section.id}") {
-                    Row(
-                        Modifier.animateItem(
-                                fadeInSpec = GatherMotion.quick(),
-                                placementSpec = GatherMotion.standard(),
-                                fadeOutSpec = GatherMotion.quick(),
-                            )
-                            .fillMaxWidth()
-                            .padding(top = 18.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            section.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        IconButton(
-                            onClick = { edit(Editor.ItemForm(list, sectionId = section.id, filter = filter)) },
-                            enabled = writable,
-                        ) {
-                            Icon(Icons.Outlined.Add, "Add item to ${section.title}")
-                        }
-                        if (!filter.active) IconButton(
-                            onClick = { edit(Editor.SectionForm(list, section)) },
-                            enabled = writable,
-                        ) {
-                            Icon(Icons.Outlined.MoreHoriz, "Edit section ${section.title}")
-                        }
-                    }
-                }
-                val sectionItems = groups[section.id].orEmpty()
-                items(sectionItems, key = { it.id }) { item ->
-                    ItemRow(
-                        list,
-                        item,
-                        writable,
-                        {
-                            if (list.kind == "checklist")
-                                model.action(
-                                    "item.update",
-                                    payload(
-                                        "listId" to list.id,
-                                        "itemId" to item.id,
-                                        "checked" to !item.checked,
-                                    ),
-                                )
-                        },
-                        { edit(Editor.ItemForm(list, item)) },
-                        ordinal = ordinals[item.id],
-                        description = item.note.takeIf { showDetails }.orEmpty(),
-                        detail = if (showDetails) list.itemMetadata(item, filter) else "",
-                        modifier =
-                            Modifier.animateItem(
-                                fadeInSpec = GatherMotion.quick(),
-                                placementSpec = GatherMotion.standard(),
-                                fadeOutSpec = GatherMotion.quick(),
-                            ),
-                    )
-                }
-                if (sectionItems.isEmpty())
-                    item(key = "empty-${section.id}") {
-                        Text(
-                            "No items in this section",
-                            Modifier.padding(vertical = 8.dp, horizontal = 12.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-            }
-        if (list.repeatCadence != "manual")
-            item {
-                Text(
-                    "${list.repeatCadence.replaceFirstChar { it.uppercase() }} · Does not reset automatically.",
-                    Modifier.padding(vertical = 12.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-    }
-}
-
-@Composable
-private fun ListDescription(description: String, lines: Int, style: androidx.compose.ui.text.TextStyle) {
-    var expanded by remember(description) { mutableStateOf(false) }
-    var truncated by remember(description, lines) { mutableStateOf(false) }
-    Column {
-        Text(
-            description,
-            style = style,
-            maxLines = if (expanded) Int.MAX_VALUE else lines,
-            overflow = TextOverflow.Ellipsis,
-            onTextLayout = { if (!expanded) truncated = it.hasVisualOverflow },
-        )
-        if (expanded || truncated)
-            TextButton(onClick = { expanded = !expanded }) {
-                Text(if (expanded) "Show less" else "Show more")
-            }
-    }
-}
-
-@Composable
 fun ItemRow(
     list: GatherList,
     item: ListItem,
@@ -1638,6 +1006,11 @@ fun ItemRow(
     ordinal: Int?,
     description: String,
     detail: String,
+    alias: String? = null,
+    selected: Boolean? = null,
+    highlighted: Boolean = false,
+    dragHandle: (@Composable () -> Unit)? = null,
+    reorderMenu: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val textColor by
@@ -1648,68 +1021,99 @@ fun ItemRow(
             label = "Item completion",
         )
     Surface(
-        onClick = edit,
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shape = if (highlighted) RoundedCornerShape(10.dp) else androidx.compose.ui.graphics.RectangleShape,
+        color = when {
+            highlighted -> MaterialTheme.colorScheme.surfaceContainerHigh
+            selected == true -> MaterialTheme.colorScheme.secondaryContainer
+            else -> MaterialTheme.colorScheme.background
+        },
+        border = if (highlighted) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
         modifier = modifier.fillMaxWidth(),
     ) {
-        Row(
-            Modifier.padding(start = 5.dp, end = 10.dp, top = 8.dp, bottom = 8.dp)
-                .heightIn(min = 54.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (list.kind == "checklist")
-                Checkbox(
-                    checked = item.checked,
-                    onCheckedChange = { toggle() },
-                    enabled = enabled,
-                    modifier =
-                        Modifier.semantics {
-                            contentDescription =
-                                "${if(item.checked)"Uncheck" else "Check"} ${item.text}"
-                        },
-                )
-            else if (ordinal == null)
-                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                    Box(
-                        Modifier.size(7.dp)
-                            .background(MaterialTheme.colorScheme.primary, CircleShape)
+        val editAction = if (reorderMenu == null) Modifier.clickable(enabled = selected == null || enabled, onClick = edit)
+            else Modifier
+        Column {
+            Row(
+                editAction.fillMaxWidth().padding(start = 4.dp, end = 18.dp, top = 2.dp, bottom = 2.dp)
+                    .heightIn(min = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (dragHandle != null) dragHandle()
+                else if (list.kind == "checklist" || selected != null)
+                    Checkbox(
+                        checked = selected ?: item.checked,
+                        onCheckedChange = { toggle() },
+                        enabled = enabled,
+                        modifier =
+                            Modifier.semantics {
+                                val action = when (selected) {
+                                    true -> "Deselect"
+                                    false -> "Select"
+                                    null -> if (item.checked) "Uncheck" else "Check"
+                                }
+                                contentDescription = "$action ${item.text}"
+                            },
                     )
+                else if (ordinal == null)
+                    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                        Box(
+                            Modifier.size(7.dp)
+                                .background(MaterialTheme.colorScheme.primary, CircleShape)
+                        )
+                    }
+                val numberedNote = ordinal != null && list.kind != "checklist" && selected == null && dragHandle == null
+                Column(
+                    Modifier.weight(1f)
+                        .padding(start = if (numberedNote) 12.dp else 0.dp, top = 8.dp, bottom = 8.dp),
+                ) {
+                    Text(
+                        if (ordinal != null) "$ordinal. ${item.text}" else item.text,
+                        style = MaterialTheme.typography.bodyLarge,
+                        textDecoration =
+                            if (item.checked && list.kind == "checklist") TextDecoration.LineThrough
+                            else null,
+                        color = textColor,
+                    )
+                    if (description.isNotBlank())
+                        Text(
+                            description,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    if (detail.isNotBlank())
+                        Text(
+                            detail,
+                            maxLines = if (androidx.compose.ui.platform.LocalDensity.current.fontScale > 1.25f) 3 else 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    if (alias != null)
+                        Text(
+                            alias,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
                 }
-            Column(Modifier.weight(1f).padding(vertical = 3.dp)) {
-                Text(
-                    if (ordinal != null) "$ordinal. ${item.text}" else item.text,
-                    style = MaterialTheme.typography.bodyLarge,
-                    textDecoration =
-                        if (item.checked && list.kind == "checklist") TextDecoration.LineThrough
-                        else null,
-                    color = textColor,
-                )
-                if (description.isNotBlank())
-                    Text(
-                        description,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
-                if (detail.isNotBlank())
-                    Text(
-                        detail,
-                        maxLines = if (androidx.compose.ui.platform.LocalDensity.current.fontScale > 1.25f) 3 else 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp),
+                if (reorderMenu != null) reorderMenu()
+                else if (selected == null)
+                    Icon(
+                        Icons.Outlined.ChevronRight,
+                        "Edit ${item.text}",
+                        Modifier.size(19.dp).padding(start = 3.dp),
+                        tint = MaterialTheme.colorScheme.outline,
                     )
             }
-            Icon(
-                Icons.Outlined.ChevronRight,
-                "Edit ${item.text}",
-                Modifier.size(20.dp).padding(start = 4.dp),
-                tint = MaterialTheme.colorScheme.outline,
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (highlighted) 0f else .6f),
             )
         }
     }

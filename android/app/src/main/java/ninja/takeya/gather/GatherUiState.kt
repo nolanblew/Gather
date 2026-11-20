@@ -26,6 +26,13 @@ class GatherUiState {
     val auth = AuthDraft()
     private val listStates = mutableMapOf<String, LazyListState>()
     val filters = mutableStateMapOf<String, ListFilter>()
+    val itemSorts = mutableStateMapOf<String, ItemSort>()
+    val itemGrouping = mutableStateMapOf<String, ItemGrouping>()
+    val itemQueries = mutableStateMapOf<String, String>()
+    var itemSearchListId by mutableStateOf<String?>(null)
+    var pendingCoverListId by mutableStateOf<String?>(null)
+    val itemSelections = mutableStateMapOf<String, Set<String>>()
+    var reorderListId by mutableStateOf<String?>(null)
     val hiddenDetails = mutableStateMapOf<String, Boolean>()
     val itemCapture = mutableStateMapOf<String, String>()
     val hiddenSavedItems = mutableStateMapOf<String, String>()
@@ -68,6 +75,13 @@ class GatherUiState {
         settings = false
         listStates.clear()
         filters.clear()
+        itemSorts.clear()
+        itemGrouping.clear()
+        itemQueries.clear()
+        itemSearchListId = null
+        pendingCoverListId = null
+        itemSelections.clear()
+        reorderListId = null
         hiddenDetails.clear()
         itemCapture.clear()
         hiddenSavedItems.clear()

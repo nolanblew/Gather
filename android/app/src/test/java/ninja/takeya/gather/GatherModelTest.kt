@@ -253,4 +253,69 @@ class GatherModelTest {
         assertEquals(Availability(), list.items.last().availability)
         assertNull(list.items.last().recipientId)
     }
+
+    @Test
+    fun nativeReadsMultiplePeopleAndFiltersAnyMembership() {
+        val json = Json { ignoreUnknownKeys = true }
+        val workspace = json.decodeFromString<Workspace>(
+            """{"version":4,"lists":[{"id":"trip","title":"Trip","items":[{"id":"shared","text":"Gift","recipientIds":["alex","maya"]},{"id":"legacy","text":"Tea","recipientId":"maya"},{"id":"unset","text":"Paper"}]}]}"""
+        )
+        val items = workspace.lists.single().items
+        assertEquals(listOf("alex", "maya"), items[0].peopleIds)
+        assertEquals(listOf("maya"), items[1].peopleIds)
+        assertEquals(listOf("shared"), items.filter(ListFilter(person = "alex")::matches).map { it.id })
+        assertEquals(listOf("shared", "legacy"), items.filter(ListFilter(person = "maya")::matches).map { it.id })
+        assertEquals(listOf("unset"), items.filter(ListFilter(person = FILTER_UNSET)::matches).map { it.id })
+    }
+
+    @Test
+    fun groupedRowsKeepOneUnderlyingIdentityAndDateAddedIgnoresManualMoves() {
+        val shared = ListItem("shared", "Gift", position = 2, recipientIds = listOf("maya", "alex"))
+        val other = ListItem("other", "Tea", position = 0)
+        val list = GatherList(
+            "list", "List", recipients = listOf(Recipient("maya", "Maya"), Recipient("alex", "Alex")),
+            items = listOf(shared, other),
+        )
+        assertEquals(listOf("shared", "other"), list.viewItems(ItemSort.DateAdded, ListFilter()).map { it.id })
+        assertEquals(listOf("other", "shared"), list.viewItems(ItemSort.Manual, ListFilter()).map { it.id })
+        val groups = list.viewGroups(list.items, ItemGrouping.Person)
+        assertEquals(listOf("Alex", "Maya", "No recipient"), groups.map { it.title })
+        assertEquals("shared", groups[0].rows.single().item.id)
+        assertEquals("shared", groups[1].rows.single().item.id)
+        assertEquals(listOf("Maya"), groups[0].rows.single().alsoUnder)
+        assertEquals(listOf("other", "shared"), movedItemIds(listOf("shared", "other"), "shared", "other"))
+    }
+
+    @Test
+    fun storedGroupOrderAppliesAcrossSectionsAndAppendsNewGroups() {
+        val list = Json.decodeFromString<GatherList>(
+            """
+            {
+              "id": "trip", "title": "Trip",
+              "sections": [{"id": "first", "title": "First"}, {"id": "second", "title": "Second", "position": 1}],
+              "recipients": [{"id": "a", "name": "Alex"}, {"id": "m", "name": "Maya"}, {"id": "s", "name": "Sam"}],
+              "personGroupOrder": ["person:s", "person:m"],
+              "placeGroupOrder": ["unassigned", "anywhere"],
+              "items": [
+                {"id": "one", "text": "Gift", "sectionId": "first", "recipientIds": ["a", "m", "s"]},
+                {"id": "two", "text": "Snack", "sectionId": "second", "recipientIds": ["a", "s"], "availability": {"mode":"anywhere"}},
+                {"id": "three", "text": "Postcard"}
+              ]
+            }
+            """.trimIndent(),
+        )
+        val joinedGroups = list.detailEntries(list.items, ItemGrouping.Person, filtered = false, splitCompleted = false)
+            .filterIsInstance<DetailEntry.GroupHeading>().map { it.title }
+        assertEquals(listOf("No recipient", "Sam", "Maya", "Alex", "Sam", "Alex"), joinedGroups)
+        val filtered = list.items.filter(ListFilter(person = "m")::matches)
+        assertEquals(listOf("Sam", "Maya", "Alex"), list.viewGroups(filtered, ItemGrouping.Person).map { it.title })
+        assertEquals(
+            listOf("person:s", "person:m", "person:a", "unassigned"),
+            list.realizedGroupLabels(ItemGrouping.Person).map { it.id },
+        )
+        assertEquals(listOf("unassigned", "anywhere"), list.realizedGroupLabels(ItemGrouping.Place).map { it.id })
+        val primaryRows = list.viewGroups(filtered, ItemGrouping.Person).flatMap { it.rows }.filter { it.isPrimaryAppearance }
+        assertEquals(listOf("one"), primaryRows.map { it.item.id })
+        assertEquals(listOf("Maya", "Sam"), primaryRows.single().alsoUnder)
+    }
 }

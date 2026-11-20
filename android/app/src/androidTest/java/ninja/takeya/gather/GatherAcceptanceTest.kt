@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import androidx.lifecycle.ViewModelProvider
 import androidx.compose.ui.MotionDurationScale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.text.AnnotatedString
 import androidx.core.view.ViewCompat
@@ -109,7 +110,7 @@ class GatherAcceptanceTest {
         val browserCookie = fixture.browserLogin()
         val webItem = "From browser ${fixture.runId}"
         fixture.action("item.create", json("listId" to listId, "text" to webItem), cookie = browserCookie)
-        clickDescription("Refresh lists")
+        refreshLists()
         scrollText(webItem)
         compose.onNodeWithText(webItem).assertIsDisplayed()
 
@@ -128,7 +129,7 @@ class GatherAcceptanceTest {
 
         // A separate native account joins, edits and then loses authorization.
         val memberToken = fixture.secondAccount()
-        clickDescription("Share list")
+        clickListOption("Share list")
         waitText("Create invitation")
         compose.onNodeWithTag("editor-save").performScrollTo().performClick()
         waitText("Copy link")
@@ -144,7 +145,7 @@ class GatherAcceptanceTest {
         fixture.request("/api/invitations/join", json("token" to inviteLink.substringAfter("#invite=")), memberToken)
         val sharedItem = "From collaborator ${fixture.runId}"
         fixture.action("item.create", json("listId" to listId, "text" to sharedItem), memberToken)
-        clickDescription("Refresh lists")
+        refreshLists()
         scrollText(sharedItem)
         compose.onNodeWithText(sharedItem).assertIsDisplayed()
         val memberId = fixture.request("/api/native/auth/session", bearer = memberToken).getString("userId")
@@ -167,7 +168,7 @@ class GatherAcceptanceTest {
             }
         fixture.action("list.update", json("listId" to listId, "categoryId" to categoryId), cookie = browserCookie)
         val categoryModel = viewModel()
-        clickDescription("Refresh lists")
+        refreshLists()
         compose.waitUntil(20_000) { categoryModel.state.value.workspace.categories.singleOrNull()?.id == categoryId }
         scrollText(categoryName)
         compose.onNodeWithText(categoryName).performScrollTo().performTouchInput { click() }
@@ -175,7 +176,7 @@ class GatherAcceptanceTest {
         scrollText(title)
         compose.onNodeWithText(title).assertIsDisplayed()
         fixture.action("category.delete", json("categoryId" to categoryId), cookie = browserCookie)
-        clickDescription("Refresh lists")
+        refreshLists()
         compose.waitUntil(20_000) { categoryModel.state.value.workspace.categories.isEmpty() }
         assertNull("A category removed by another client must clear the active filter", categoryModel.state.value.categoryId)
         compose.onAllNodesWithText(categoryName).assertCountEquals(0)
@@ -209,7 +210,7 @@ class GatherAcceptanceTest {
         val master = fixture.action("list.create", json("title" to masterTitle, "isTemplate" to true))
         val masterId = master.getString("createdListId")
         fixture.action("item.create", json("listId" to masterId, "text" to "Pack shoes", "checked" to true))
-        clickDescription("Refresh lists")
+        refreshLists()
         click("Templates")
         scrollText(masterTitle)
         click(masterTitle)
@@ -260,7 +261,7 @@ class GatherAcceptanceTest {
         compose.onNodeWithText("Cancel").performScrollTo().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("editor-save").fetchSemanticsNodes().isEmpty() }
         waitDescription("Refresh lists")
-        clickDescription("Refresh lists")
+        refreshLists()
         scrollText("Forest")
         click("Forest")
         compose.onNodeWithText("Forest").assertIsSelected()
@@ -736,6 +737,112 @@ class GatherAcceptanceTest {
         }
     }
 
+    @Test fun groupedSelectionBulkAddPreservesExistingPeople() {
+        val fixture = LocalAcceptanceFixture()
+        signIn(fixture)
+        val title = "Grouped bulk ${fixture.runId}"
+        val listId = fixture.action("list.create", json("title" to title)).getString("createdListId")
+        fixture.action("item.create", json(
+            "listId" to listId, "text" to "Shared gift",
+            "newRecipients" to org.json.JSONArray().put(json("name" to "Alex")).put(json("name" to "Maya")),
+        ))
+        val initial = checkNotNull(fixture.list(title))
+        val people = initial.getJSONArray("recipients")
+        val alexId = (0 until people.length()).map { people.getJSONObject(it) }.first { it.getString("name") == "Alex" }.getString("id")
+        val mayaId = (0 until people.length()).map { people.getJSONObject(it) }.first { it.getString("name") == "Maya" }.getString("id")
+        fixture.action("item.create", json("listId" to listId, "text" to "Other gift", "recipientId" to mayaId))
+        val model = viewModel()
+        compose.runOnIdle { model.refresh() }
+        compose.waitUntil(20_000) { model.state.value.workspace.lists.any { it.id == listId } }
+        compose.runOnIdle { model.select(listId) }
+        waitTag("page-detail:$listId")
+        scrollText("View")
+        click("View")
+        click("Person")
+        click("Apply")
+        scrollText("Grouped by person · 2 items")
+        clickListOption("Select items")
+        scrollText("Alex")
+        scrollDescription("Select Shared gift")
+        compose.onAllNodesWithContentDescription("Select Shared gift").onFirst().performClick()
+        scrollText("1 selected")
+        compose.onNodeWithText("1 selected").assertExists()
+        // Both appearances are projections of the same item, and therefore both are selected.
+        scrollText("Maya")
+        scrollDescription("Deselect Shared gift")
+        compose.onAllNodesWithContentDescription("Deselect Shared gift").onFirst().assertIsOn()
+        scrollDescription("Select Other gift")
+        clickDescription("Select Other gift")
+        scrollText("2 selected")
+        click("Add people")
+        click("Alex")
+        click("Add to 2 items")
+        awaitStored("add Alex without replacing Maya") {
+            val shared = fixture.item(title, "Shared gift") ?: return@awaitStored false
+            val other = fixture.item(title, "Other gift") ?: return@awaitStored false
+            fun ids(item: JSONObject): Set<String> {
+                val values = item.optJSONArray("recipientIds") ?: return setOfNotNull(item.optString("recipientId").takeIf { it.isNotBlank() })
+                return (0 until values.length()).map { values.getString(it) }.toSet()
+            }
+            ids(shared) == setOf(alexId, mayaId) && ids(other) == setOf(alexId, mayaId)
+        }
+    }
+
+    @Test fun reorderGroupsByArrowAndTouchWithAFilterActive() {
+        val fixture = LocalAcceptanceFixture()
+        signIn(fixture)
+        val title = "Group order ${fixture.runId}"
+        val listId = fixture.action("list.create", json("title" to title)).getString("createdListId")
+        val names = listOf("Alex", "Maya", "Sam")
+        names.forEach { name ->
+            fixture.action("item.createWithPeople", json(
+                "listId" to listId,
+                "text" to "Gift for $name",
+                "newRecipients" to org.json.JSONArray().put(json("name" to name)),
+            ))
+        }
+        val people = checkNotNull(fixture.list(title)).getJSONArray("recipients")
+        val personKeys = (0 until people.length()).map { people.getJSONObject(it) }
+            .associate { it.getString("name") to "person:${it.getString("id")}" }
+        val model = viewModel()
+        compose.runOnIdle { model.refresh() }
+        compose.waitUntil(20_000) { model.state.value.workspace.lists.any { it.id == listId } }
+        compose.runOnIdle { model.select(listId) }
+        waitTag("page-detail:$listId")
+        scrollText("View")
+        click("View")
+        click("Person")
+        click("All people")
+        click("Alex")
+        click("Apply")
+        waitText("Grouped by person · 1 item")
+        compose.onAllNodesWithText("Reorder groups").assertCountEquals(0)
+
+        scrollDescription("List options")
+        clickDescription("List options")
+        click("Reorder items")
+        scrollText("Reorder groups")
+        click("Reorder groups")
+        clickDescription("Move Maya up")
+        val arrowOrder = listOf("Maya", "Alex", "Sam").map(personKeys::getValue)
+        compose.waitUntil(20_000) { model.state.value.selected?.personGroupOrder == arrowOrder }
+
+        val samHandle = compose.onNodeWithContentDescription("Drag Sam")
+        val center = samHandle.fetchSemanticsNode().boundsInRoot.center
+        val mayaCenter = compose.onNodeWithContentDescription("Drag Maya").fetchSemanticsNode().boundsInRoot.center
+        samHandle.performTouchInput {
+            swipe(this.center, this.center + Offset(0f, mayaCenter.y - center.y), durationMillis = 500)
+        }
+        val draggedOrder = listOf("Sam", "Maya", "Alex").map(personKeys::getValue)
+        compose.waitUntil(20_000) { model.state.value.selected?.personGroupOrder == draggedOrder }
+        awaitStored("persisted group order including filtered groups") {
+            fixture.list(title)?.optJSONArray("personGroupOrder")?.toString() == org.json.JSONArray(draggedOrder).toString()
+        }
+        click("Reset order")
+        compose.waitUntil(20_000) { model.state.value.selected?.personGroupOrder == emptyList<String>() }
+        awaitStored("restored default group order") { fixture.list(title)?.has("personGroupOrder") == false }
+    }
+
     @Test fun organizationKeepsPlainCaptureAndFiltersCanonicalNumberedItems() {
         val fixture = LocalAcceptanceFixture()
         signIn(fixture)
@@ -789,15 +896,17 @@ class GatherAcceptanceTest {
         click("For someone")
         editorText("field-Search people", "Maya")
         click("Create “Maya”")
+        editorText("field-Search people", "Alex")
+        click("Create “Alex”")
         click("Done")
         saveEditor()
         awaitStored("atomic places, person and description") {
             val list = fixture.list(title) ?: return@awaitStored false
             val item = fixture.item(title, "Tea") ?: return@awaitStored false
             list.getJSONArray("places").length() == 2 &&
-                list.getJSONArray("recipients").length() == 1 &&
+                list.getJSONArray("recipients").length() == 2 &&
                 item.getJSONObject("availability").getJSONArray("placeIds").length() == 2 &&
-                item.getString("recipientId") == list.getJSONArray("recipients").getJSONObject(0).getString("id") &&
+                item.getJSONArray("recipientIds").length() == 2 &&
                 item.getString("note") == description
         }
         scrollText("1. Tea")
@@ -808,7 +917,8 @@ class GatherAcceptanceTest {
 
         val stored = checkNotNull(fixture.list(title))
         val listId = stored.getString("id")
-        val personId = stored.getJSONArray("recipients").getJSONObject(0).getString("id")
+        val people = stored.getJSONArray("recipients")
+        val personId = (0 until people.length()).map { people.getJSONObject(it) }.first { it.getString("name") == "Maya" }.getString("id")
         val mugId = checkNotNull(fixture.item(title, "Mug")).getString("id")
         fixture.action("item.update", json(
             "listId" to listId, "itemId" to mugId, "checked" to true,
@@ -846,17 +956,22 @@ class GatherAcceptanceTest {
         compose.onNodeWithText("1. Tea").assertIsDisplayed()
         captureOrganizationScreenshot("organization-filtered-list")
 
-        click("1. Tea")
-        click("Item actions")
-        click("Edit order")
-        click("Show all items")
-        click("Move down")
-        awaitStored("move in full order") {
+        click("Clear")
+        scrollDescription("List options")
+        clickDescription("List options")
+        click("Reorder items")
+        waitText("Manual order")
+        val teaHandle = compose.onNodeWithContentDescription("Drag Tea")
+        val teaCenter = teaHandle.fetchSemanticsNode().boundsInRoot.center
+        val paperCenter = compose.onNodeWithContentDescription("Drag Paper").fetchSemanticsNode().boundsInRoot.center
+        teaHandle.performTouchInput {
+            swipe(center, center + Offset(0f, paperCenter.y - teaCenter.y + 12f), durationMillis = 500)
+        }
+        awaitStored("drag in full order") {
             fixture.item(title, "Tea")?.optInt("position") == 1 &&
                 fixture.item(title, "Paper")?.optInt("position") == 0
         }
         click("Done")
-        click("Cancel")
         scrollText("2. Tea")
         compose.onNodeWithText("2. Tea").assertIsDisplayed()
 
@@ -884,6 +999,45 @@ class GatherAcceptanceTest {
         click("Cancel")
         scrollText("Stationery")
         compose.onNodeWithText("Stationery").assertIsDisplayed()
+    }
+
+    @Test fun listCoverCollapsesAndReturnsAtTheTop() {
+        val fixture = LocalAcceptanceFixture()
+        val title = "Japan Gift List ${fixture.runId}"
+        val created = fixture.action("list.create", json("title" to title, "description" to "Gifts to bring home from Kyoto"))
+        val listId = created.getString("createdListId")
+        val gifts = listOf("Takayama Gatcha Snow Globe", "Onsen bath salts", "Apple Tea", "Zelda Switch Controller", "Baby Train Toys")
+        repeat(20) { index ->
+            fixture.action("item.create", json("listId" to listId, "text" to (gifts.getOrNull(index) ?: "Gift ${index + 1}")))
+        }
+        val resources = InstrumentationRegistry.getInstrumentation().targetContext.resources
+        val connection = java.net.URL(fixture.baseUrl.trimEnd('/') + "/api/lists/$listId/cover").openConnection() as java.net.HttpURLConnection
+        try {
+            connection.requestMethod = "PUT"
+            connection.doOutput = true
+            connection.setRequestProperty("Authorization", "Bearer ${fixture.token}")
+            connection.setRequestProperty("Content-Type", "image/webp")
+            connection.outputStream.use { out -> resources.openRawResource(R.drawable.list_hero).use { it.copyTo(out) } }
+            assertEquals(200, connection.responseCode)
+        } finally {
+            connection.disconnect()
+        }
+        signIn(fixture)
+        scrollText(title)
+        click(title)
+        waitTag("detail-cover")
+        compose.onNodeWithTag("detail-summary").assertIsDisplayed()
+        captureOrganizationScreenshot("list-cover-expanded")
+        val top = compose.onNodeWithTag("detail-toolbar").fetchSemanticsNode().boundsInRoot.top
+        compose.onNodeWithTag("detail-items").performTouchInput { swipeUp() }
+        waitTag("detail-compact-title")
+        compose.onNodeWithTag("detail-compact-title").assertTextContains(title)
+        assertEquals(top, compose.onNodeWithTag("detail-toolbar").fetchSemanticsNode().boundsInRoot.top, 1f)
+        compose.onNodeWithTag("quick-item-text").assertIsDisplayed()
+        captureOrganizationScreenshot("list-cover-compact")
+        compose.onNodeWithTag("detail-items").performScrollToIndex(0)
+        waitTag("detail-cover")
+        compose.onNodeWithTag("detail-summary").assertIsDisplayed()
     }
 
     private fun captureOrganizationScreenshot(name: String) {
@@ -983,6 +1137,15 @@ class GatherAcceptanceTest {
         compose.onAllNodesWithText(text, useUnmergedTree = true).onFirst().performTouchInput { click() }
     }
     private fun clickDescription(text: String) { waitDescription(text); compose.onNodeWithContentDescription(text).performClick() }
+    private fun clickListOption(text: String) {
+        clickDescription("List options")
+        click(text)
+    }
+
+    private fun refreshLists() {
+        if (viewModel().state.value.selectedId != null) clickListOption("Refresh lists")
+        else clickDescription("Refresh lists")
+    }
     private fun scrollText(text: String) {
         scrollTo(hasText(text), text)
     }
@@ -990,6 +1153,8 @@ class GatherAcceptanceTest {
         scrollTo(hasContentDescription(text), text)
     }
     private fun scrollTo(matcher: SemanticsMatcher, label: String) {
+        val matches = compose.onAllNodes(matcher)
+        if (matches.fetchSemanticsNodes().indices.any { runCatching { matches[it].assertIsDisplayed() }.isSuccess }) return
         var lastFailure: Throwable? = null
         try {
             compose.waitUntil(20_000) {
@@ -1011,7 +1176,8 @@ class GatherAcceptanceTest {
         val deadline = SystemClock.elapsedRealtime() + 20_000
         while (SystemClock.elapsedRealtime() < deadline) {
             if (condition()) {
-                compose.waitUntil(20_000) { compose.onAllNodes(hasContentDescription("Refresh lists") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
+                val model = viewModel()
+                compose.waitUntil(20_000) { !model.state.value.busy }
                 compose.waitForIdle()
                 return
             }

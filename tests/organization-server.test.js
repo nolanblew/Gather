@@ -17,7 +17,7 @@ const byLexicalId = (a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
 function deletionToken(list, type, entry) {
   const pairs = type === 'place' ? list.items.filter(item => item.availability?.placeIds.includes(entry.id))
     .map(item => [item.id, selected(...item.availability.placeIds.toSorted())]) :
-    list.items.filter(item => item.recipientId === entry.id).map(item => [item.id, entry.id]);
+    list.items.filter(item => item.recipientId === entry.id || item.recipientIds?.includes(entry.id)).map(item => [item.id, entry.id]);
   return sha256([type, entry.id, entry, pairs.sort(byLexicalId)]);
 }
 
@@ -132,7 +132,133 @@ test('inline definitions, independent assignment expectations and guarded dictio
   assert.equal(list().items.length, 1);
 });
 
-test('clone and v3 backup copies preserve organization through remapped definitions and references', async t => {
+test('multiple recipients retain legacy singleton compatibility and guarded member deletion', async t => {
+  const { act, listId, list, store } = await fixture(t);
+  const onList = (type, fields) => act(type, { listId, ...fields });
+  const maya = onList('recipient.create', { name: 'Maya' }).createdRecipientId;
+  const alex = onList('recipient.create', { name: 'Alex' }).createdRecipientId;
+  const itemId = onList('item.create', { text: 'Gift', recipientIds: [maya] }).createdItemId;
+  assert.equal(list().items[0].recipientId, maya);
+  assert.equal(list().items[0].recipientIds, undefined);
+  onList('item.update', { itemId, recipientIds: [maya, alex], expectedRecipientIds: [maya] });
+  assert.deepEqual(list().items[0].recipientIds, [maya, alex].sort());
+  assert.equal(list().items[0].recipientId, undefined);
+  const before = list();
+  assert.throws(() => onList('item.update', { itemId, recipientId: null, expectedRecipientId: null }), { status: 409 });
+  assert.deepEqual(list(), before);
+  const original = store.export(owner);
+  const copy = act('list.clone', { listId }).lists.find(value => value.id !== listId);
+  assert.deepEqual(copy.items[0].recipientIds, copy.recipients.map(person => person.id).sort());
+  assert.deepEqual(original.lists[0].items[0].recipientIds, [maya, alex].sort());
+  const mayaEntry = list().recipients.find(person => person.id === maya);
+  const token = deletionToken(list(), 'recipient', mayaEntry);
+  onList('recipient.delete', { recipientId: maya, expectedAssignmentToken: token });
+  assert.equal(list().items[0].recipientId, alex);
+  assert.equal(list().items[0].recipientIds, undefined);
+
+  const backup = store.export(owner);
+  assert.equal(backup.version, 4);
+  const v3 = structuredClone(backup);
+  v3.version = 3;
+  v3.lists = v3.lists.filter(value => value.id === listId);
+  const imported = store.import(v3, owner).lists.find(value => value.id !== listId && value.id !== copy.id);
+  assert.equal(imported.items[0].recipientId, imported.recipients.find(person => person.name === 'Alex').id);
+});
+
+test('bulk additions union assignments and reject invalid selections atomically', async t => {
+  const { act, listId, list } = await fixture(t);
+  const onList = (type, fields) => act(type, { listId, ...fields });
+  const maya = onList('recipient.create', { name: 'Maya' }).createdRecipientId;
+  const alex = onList('recipient.create', { name: 'Alex' }).createdRecipientId;
+  const kyoto = onList('place.create', { name: 'Kyoto', kind: 'city' }).createdPlaceId;
+  const first = onList('item.create', { text: 'Gift', recipientId: alex, availability: { mode: 'anywhere', placeIds: [] } }).createdItemId;
+  const second = onList('item.create', { text: 'Tea', recipientId: maya }).createdItemId;
+  onList('item.bulkAdd', { itemIds: [first, second], recipientIds: [maya], placeIds: [kyoto] });
+  const [gift, tea] = list().items;
+  assert.deepEqual(gift.recipientIds, [alex, maya].sort());
+  assert.equal(tea.recipientId, maya);
+  assert.deepEqual(gift.availability, selected(kyoto));
+  assert.deepEqual(tea.availability, selected(kyoto));
+  const before = list();
+  assert.throws(() => onList('item.bulkAdd', { itemIds: [first, 'missing'], newRecipients: [{ name: 'New person' }] }));
+  assert.deepEqual(list(), before);
+  onList('item.update', { itemId: second, availability: { mode: 'anywhere', placeIds: [] }, expectedAvailability: selected(kyoto) });
+  const concurrent = list();
+  assert.throws(() => onList('item.bulkAdd', { itemIds: [first, second], placeIds: [kyoto], expectedAnywhereItemIds: [] }), { status: 409 });
+  assert.deepEqual(list(), concurrent);
+  const payload = { itemIds: [first, second], placeIds: [kyoto], expectedAnywhereItemIds: [second] };
+  onList('item.bulkAdd', payload);
+  assert.equal(list().items.find(item => item.id === second).availability.mode, 'selected');
+  assert.doesNotThrow(() => onList('item.bulkAdd', payload));
+});
+
+test('visible reordering replaces only selected slots and guards the full order', async t => {
+  const { act, listId, list } = await fixture(t);
+  const onList = (type, fields) => act(type, { listId, ...fields });
+  const ids = ['A', 'Hidden', 'B', 'C'].map(text => onList('item.create', { text }).createdItemId);
+  const token = list().orderToken;
+  onList('item.reorderVisible', { itemIds: [ids[3], ids[0], ids[2]], expectedOrderToken: token });
+  const order = () => list().items.filter(item => item.sectionId === null).toSorted((a, b) => a.position - b.position).map(item => item.id);
+  assert.deepEqual(order(), [ids[3], ids[1], ids[0], ids[2]]);
+  assert.throws(() => onList('item.reorderVisible', { itemIds: [ids[0], ids[2]], expectedOrderToken: token }), { status: 409 });
+  for (const invalid of [[ids[0], ids[0]], [ids[0], 'missing']]) {
+    assert.throws(() => onList('item.reorderVisible', { itemIds: invalid, expectedOrderToken: list().orderToken }));
+  }
+  onList('section.create', { title: 'Other' });
+  const sectionId = list().sections[0].id;
+  const otherId = onList('item.create', { text: 'Other', sectionId }).createdItemId;
+  assert.throws(() => onList('item.reorderVisible', { itemIds: [ids[0], otherId], expectedOrderToken: list().orderToken }));
+  assert.deepEqual(order(), [ids[3], ids[1], ids[0], ids[2]]);
+});
+
+test('group order is guarded, resettable, cleaned on deletion and remapped on copies', async t => {
+  const { act, listId, list, store } = await fixture(t);
+  const onList = (type, fields) => act(type, { listId, ...fields });
+  const alex = onList('recipient.create', { name: 'Alex' }).createdRecipientId;
+  const maya = onList('recipient.create', { name: 'Maya' }).createdRecipientId;
+  const kyoto = onList('place.create', { name: 'Kyoto', kind: 'city' }).createdPlaceId;
+  const tokyo = onList('place.create', { name: 'Tokyo', kind: 'city' }).createdPlaceId;
+  onList('item.create', { text: 'Gift', recipientIds: [alex, maya], availability: selected(kyoto, tokyo) });
+  onList('item.create', { text: 'Bag', availability: { mode: 'anywhere', placeIds: [] } });
+  onList('item.create', { text: 'Paper' });
+  const positions = list().items.map(item => [item.id, item.position]);
+  const people = [`person:${maya}`, 'unassigned', `person:${alex}`];
+  const places = [`place:${tokyo}`, 'anywhere', `place:${kyoto}`, 'unassigned'];
+  onList('group.reorder', { kind: 'person', groupIds: people, expectedGroupIds: [] });
+  onList('group.reorder', { kind: 'place', groupIds: places, expectedGroupIds: [] });
+  assert.deepEqual(list().personGroupOrder, people);
+  assert.deepEqual(list().placeGroupOrder, places);
+  assert.deepEqual(list().items.map(item => [item.id, item.position]), positions);
+  assert.throws(() => onList('group.reorder', { kind: 'person', groupIds: [], expectedGroupIds: [] }), { status: 409 });
+  assert.deepEqual(list().personGroupOrder, people);
+  for (const invalid of [[`person:${alex}`, `person:${alex}`], ['person:missing'], ['anywhere']]) {
+    assert.throws(() => onList('group.reorder', { kind: 'person', groupIds: invalid, expectedGroupIds: people }));
+  }
+
+  const copyResult = act('list.clone', { listId });
+  const clone = copyResult.lists.find(value => value.id === copyResult.createdListId);
+  const backup = store.export(owner);
+  const imported = store.import({ ...backup, lists: backup.lists.filter(value => value.id === listId) }, owner)
+    .lists.find(value => value.id !== listId && value.id !== clone.id);
+  for (const copy of [clone, imported]) {
+    const byName = (collection, name) => collection.find(entry => entry.name === name).id;
+    assert.deepEqual(copy.personGroupOrder, [`person:${byName(copy.recipients, 'Maya')}`, 'unassigned', `person:${byName(copy.recipients, 'Alex')}`]);
+    assert.deepEqual(copy.placeGroupOrder, [`place:${byName(copy.places, 'Tokyo')}`, 'anywhere', `place:${byName(copy.places, 'Kyoto')}`, 'unassigned']);
+  }
+  const person = list().recipients.find(entry => entry.id === maya);
+  const place = list().places.find(entry => entry.id === tokyo);
+  onList('recipient.delete', { recipientId: maya, expectedAssignmentToken: deletionToken(list(), 'recipient', person) });
+  onList('place.delete', { placeId: tokyo, expectedAssignmentToken: deletionToken(list(), 'place', place) });
+  assert.deepEqual(list().personGroupOrder, ['unassigned', `person:${alex}`]);
+  assert.deepEqual(list().placeGroupOrder, ['anywhere', `place:${kyoto}`, 'unassigned']);
+  assert.deepEqual(list().items.map(item => [item.id, item.position]), positions);
+  onList('group.reorder', { kind: 'person', groupIds: [], expectedGroupIds: list().personGroupOrder });
+  onList('group.reorder', { kind: 'place', groupIds: [], expectedGroupIds: list().placeGroupOrder });
+  assert.ok(!list().personGroupOrder?.length);
+  assert.ok(!list().placeGroupOrder?.length);
+});
+
+test('clone and backup copies preserve organization through remapped definitions and references', async t => {
   const { store, act, listId, list } = await fixture(t);
   let current = list();
   act('list.update', { listId, numbered: true, expectedOrderToken: current.orderToken });
@@ -145,7 +271,7 @@ test('clone and v3 backup copies preserve organization through remapped definiti
   const cloned = act('list.clone', { listId }, editor);
   const clone = cloned.lists.find(l => l.id === cloned.createdListId);
   const backup = store.export(owner);
-  assert.equal(backup.version, 3);
+  assert.equal(backup.version, 4);
   assert.equal(backup.lists[0].orderToken, undefined);
   assert.equal(backup.lists[0].role, undefined);
   const imported = store.import(backup, editor).lists.find(l => l.id !== listId && l.id !== clone.id);
@@ -206,16 +332,16 @@ test('v2 account migration is transactional and preserves sparse documents near 
   const emptyAccount = { ...JSON.parse(read.get(editor).document), version: 2 };
   update.run(saved, owner);
   update.run(JSON.stringify({ ...emptyAccount, lists: [{}] }), editor);
-  db.prepare('DELETE FROM user_migrations WHERE name=?').run('workspace-v3');
+  db.prepare('DELETE FROM user_migrations WHERE name=?').run('workspace-v4');
   assert.throws(() => createUserStore(f.dir), { status: 400 });
   assert.equal(read.get(owner).document, saved);
-  assert.equal(db.prepare("SELECT 1 FROM user_migrations WHERE name='workspace-v3'").get(), undefined);
+  assert.equal(db.prepare("SELECT 1 FROM user_migrations WHERE name='workspace-v4'").get(), undefined);
   update.run(JSON.stringify(emptyAccount), editor);
   db.close();
 
   f.reopen();
   const backup = f.store.export(owner);
-  assert.equal(backup.version, 3);
+  assert.equal(backup.version, 4);
   assert.ok(Buffer.byteLength(JSON.stringify(backup)) <= WORKSPACE_BYTE_LIMIT);
   assert.deepEqual(backup.lists[0].items, legacy.lists[0].items);
   assert.equal(backup.lists[0].updatedAt, legacy.lists[0].updatedAt);

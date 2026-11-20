@@ -4,11 +4,21 @@
 
 Gather is a responsive home for everyday lists, gift ideas, projects, and reusable trip checklists. The phone layout emphasizes quick capture and checking things off; desktop adds persistent navigation and a spacious library.
 
+## List covers
+
+The list opens with a photo and progress summary that collapse into a compact toolbar as you scroll. On large windows a side panel keeps list information and group navigation in reach. Open the list menu and choose **Change cover** to upload a photo. Owners and editors share the same cover.
+
+With a server-side `OPENAI_API_KEY`, Gather queues a cover for each newly created list. After a 30-second grace period it sends the current title and description to OpenAI’s Images API. Deleting the list, archiving it as its owner, or uploading a photo cancels pending generation. A copy inherits its source cover when available. Existing lists keep the built-in artwork until someone chooses a photo. The SQLite volume backup includes covers. Portable JSON backups contain list data only.
+
+Administrators can set `GATHER_COVER_GENERATION=false` to use uploads alone. `GATHER_COVER_MODEL` defaults to `gpt-image-2`. The service runs one generation at a time and defers queued work after `GATHER_COVER_DAILY_LIMIT` requests in a rolling 24 hours (default 50). API image charges apply.
+
 ## Optional organization
 
-Start with an ordinary list and add details only when useful. **Add detail** offers descriptions, alternative places, a person an item is for, quantity and sections. Places and people belong to that list. **Filter this list** shows relevant choices; **Number items** adds shared numbering for priorities and sequences. Descriptions support multiple paragraphs.
+Use **Add detail** to add a description, quantity, section, alternative places, or the people an item is for. **Select items** lets you add people or places to several items together. Places and people belong to the list.
 
-See the [product requirements](docs/TRIP-ORGANIZATION-PRD.md), [technical design](docs/TRIP-ORGANIZATION-TDR.md), and [implementation checks](docs/ORGANIZATION-IMPLEMENTATION-VERIFICATION.md). This feature uses workspace version 3; update the server before clients. Automatic location suggestions remain future work.
+Ordinary lists open in date-added order. Use **View** to filter items, group them by place or person, or change the sort. A shared item appears in each applicable group. Checking it off updates every appearance. Manual reordering moves it within its section, including when viewing a filtered group. To put stops or people in trip order, group the list by place or person, enter reorder mode from the list menu, then choose **Reorder groups**. Drag a group by its handle or use its move buttons. Everyone on the list sees the saved order. **Reset order** restores the default for that grouping. **Number items** displays the shared item sequence.
+
+These features use workspace version 4. Update the server before clients. Existing lists and earlier backups retain their assignments. [Shared API](docs/API.md)
 
 ## Native Android app
 

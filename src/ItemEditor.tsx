@@ -1,22 +1,24 @@
-import { useId, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, ChevronDown, Copy, Plus, Trash2, UserRound, X } from 'lucide-react';
 import Dialog from './Dialog';
-import { detailChoices, emptyPlaceFields, PickerBack, PlaceInputs, RadioChoices } from './OrganizationDetails';
+import { detailChoices, emptyPlaceFields, PickerBack, PlaceInputs } from './OrganizationDetails';
 import { byPosition, visibleItemOrder } from './itemOrder';
-import { filterOptions, nameKey, noAvailability, normalizeName, orderGuard, placeLabel, sameAvailability, usedFirst } from './organization';
+import { filterOptions, itemRecipientIds, nameKey, noAvailability, normalizeName, orderGuard, placeLabel, sameAvailability, usedFirst } from './organization';
 import type { Availability, GatherList, Item, Mutation, Payload, PlaceFields, Workspace } from './types';
 
 type Detail = keyof typeof detailChoices;
 type Surface = 'item' | 'details' | 'place' | 'person' | 'delete';
 type NewPlace = { name: string } & Partial<PlaceFields>;
 interface PlaceDraft { availability: Availability; newPlaces: NewPlace[] }
-interface PersonDraft { id: string | null; newName: string }
+interface PersonDraft { ids: string[]; newPeople: { name: string }[] }
+const emptyPeople: PersonDraft = { ids: [], newPeople: [] };
+const samePeople = (left: string[], right: string[]) => left.length === right.length && left.every(id => right.includes(id));
 
 export function makeItemDraft(overrides: Partial<Item> = {}): Item {
   return { id: '', text: '', quantity: '', note: '', sectionId: null, position: 0, checked: false, ...overrides };
 }
 
-export default function ItemEditor({ list, initial, organization, filtered, busy, error, clearError, mutate, saved, close, showFullOrder }: {
+export default function ItemEditor({ list, initial, organization, filtered, busy, error, clearError, mutate, saved, close, showFullOrder, useManualOrder }: {
   list: GatherList;
   initial: Item;
   organization: boolean;
@@ -28,11 +30,12 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
   saved: (result: Workspace, id: string | undefined) => void;
   close: () => void;
   showFullOrder: () => void;
+  useManualOrder: () => void;
 }) {
   const [draft, setDraft] = useState(initial);
   const [source, setSource] = useState(initial);
   const [place, setPlace] = useState<PlaceDraft>({ availability: initial.availability || noAvailability, newPlaces: [] });
-  const [person, setPerson] = useState<PersonDraft>({ id: initial.recipientId || null, newName: '' });
+  const [person, setPerson] = useState<PersonDraft>({ ids: itemRecipientIds(initial), newPeople: [] });
   const [surface, setSurface] = useState<Surface>('item');
   const [hasDescription, setHasDescription] = useState(Boolean(initial.note));
   const [hasQuantity, setHasQuantity] = useState(Boolean(initial.quantity));
@@ -50,11 +53,12 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
   const used = filterOptions(list);
   const current = draft.id ? list.items.find(item => item.id === draft.id) : undefined;
   const currentPlace = current?.availability || noAvailability;
-  const currentPerson = current?.recipientId || null;
+  const currentPersonIds = current ? itemRecipientIds(current) : [];
   const changingPlace = !sameAvailability(place.availability, initial.availability || noAvailability) || place.newPlaces.length > 0;
-  const changingPerson = person.id !== (initial.recipientId || null) || Boolean(person.newName);
+  const changingPerson = !samePeople(person.ids, itemRecipientIds(initial)) || person.newPeople.length > 0;
   const placeConflict = changingPlace && current && !sameAvailability(source.availability || noAvailability, currentPlace) && (place.newPlaces.length > 0 || !sameAvailability(place.availability, currentPlace));
-  const personConflict = changingPerson && current && (source.recipientId || null) !== currentPerson && (person.newName || person.id !== currentPerson);
+  const personConflict = changingPerson && current && !samePeople(itemRecipientIds(source), currentPersonIds)
+    && (person.newPeople.length > 0 || !samePeople(person.ids, currentPersonIds));
   const originalPlaces = list.places || [];
   const originalPeople = list.recipients || [];
   const currentPlaces = new Map(originalPlaces.map(place => [place.id, place]));
@@ -62,17 +66,17 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
   const [knownPlaces] = useState(() => new Map(originalPlaces.map(place => [place.id, place])));
   const [knownPeople] = useState(() => new Map(originalPeople.map(person => [person.id, person])));
   const missingPlaces = place.availability.placeIds.filter(id => !currentPlaces.has(id));
-  const missingPerson = person.id && !currentPeople.has(person.id) ? person.id : null;
+  const missingPeople = person.ids.filter(id => !currentPeople.has(id));
   const missingSection = draft.sectionId && !list.sections.some(section => section.id === draft.sectionId);
   const move = current ? visibleItemOrder(list, current) : null;
   const sectionChanged = draft.sectionId !== initial.sectionId;
   const orderChanged = (!draft.id || sectionChanged) && Boolean(list.numbered && orderSnapshot !== list.orderToken);
   const hasPlace = place.availability.mode !== 'unassigned';
-  const hasPerson = Boolean(person.id || person.newName);
+  const hasPerson = person.ids.length > 0 || person.newPeople.length > 0;
   const choiceOrder = [...new Set<Detail>([...recommended, 'description', 'place', 'person', 'quantity', 'section'])];
   const present: Record<Detail, boolean> = { description: hasDescription, place: hasPlace, person: hasPerson, quantity: hasQuantity, section: hasSection };
   const choices = choiceOrder.filter(key => !present[key] && (organization || (key !== 'place' && key !== 'person')));
-  const blocked = Boolean((!draft.id || changingPlace) && missingPlaces.length || (!draft.id || changingPerson) && missingPerson || (!draft.id || sectionChanged) && missingSection || placeConflict || personConflict || orderChanged);
+  const blocked = Boolean((!draft.id || changingPlace) && missingPlaces.length || (!draft.id || changingPerson) && missingPeople.length || (!draft.id || sectionChanged) && missingSection || placeConflict || personConflict || orderChanged);
 
   const select = (key: Detail) => {
     setValidation('');
@@ -112,19 +116,20 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
         payload.expectedAvailability = source.availability || noAvailability;
         payload.availability = place.availability;
       }
-      if (changingPerson && (person.newName || person.id !== currentPerson)) {
-        payload.expectedRecipientId = source.recipientId || null;
-        payload.recipientId = person.id;
+      if (changingPerson && (person.newPeople.length || !samePeople(person.ids, currentPersonIds))) {
+        payload.expectedRecipientIds = itemRecipientIds(source);
+        payload.recipientIds = person.ids;
       }
     } else {
       Object.assign(payload, { text: draft.text, note: draft.note, quantity: draft.quantity, sectionId: draft.sectionId }, orderGuard(list));
       if (hasPlace) payload.availability = place.availability;
-      if (person.id) payload.recipientId = person.id;
+      if (hasPerson) payload.recipientIds = person.ids;
     }
     if (place.newPlaces.length) payload.newPlaces = place.newPlaces;
-    if (person.newName) payload.newRecipient = { name: person.newName };
+    if (person.newPeople.length) payload.newRecipients = person.newPeople;
     if (current && Object.keys(payload).length === 2) { close(); return; }
-    const result = await mutate(draft.id ? 'item.update' : 'item.create', payload);
+    const action = draft.id ? 'item.update' : 'item.create';
+    const result = await mutate('recipientIds' in payload ? `${action}WithPeople` : action, payload);
     if (result) saved(result, draft.id || result.createdItemId);
   };
   const title = surface === 'details' ? 'Add detail' : surface === 'place' ? 'Choose places' : surface === 'person' ? 'For someone' : surface === 'delete' ? 'Delete this item?' : startedForSomeone ? 'Duplicate for someone else' : !draft.id && initial.id ? 'Duplicate item' : 'Item details';
@@ -140,7 +145,8 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
       <div className="dialog-actions"><button className="secondary" onClick={() => showItem('add-detail')}>Cancel</button></div>
     </>}
     {surface === 'place' && <PlacesPicker initial={place} entries={usedFirst(originalPlaces, used.places)} back={closeSurface} done={value => { setPlace(value); showItem('place'); }} />}
-    {surface === 'person' && <PersonPicker initial={person} people={usedFirst(originalPeople, used.people)} forSomeone={startedForSomeone && !person.id && !person.newName} back={closeSurface} done={value => { setPerson(value); showItem('person'); }} />}
+    {surface === 'person' && <PersonPicker initial={person} people={usedFirst(originalPeople, used.people)}
+      itemText={draft.text} requireChoice={startedForSomeone} back={closeSurface} done={value => { setPerson(value); showItem('person'); }} />}
     {surface === 'delete' && <>
       <p className="dialog-copy">“{current?.text || initial.text}” will be permanently removed from this list.</p>
       {list.numbered && orderSnapshot !== list.orderToken && <p className="field-error" role="alert">The list order changed. Review the latest order and try again.</p>}
@@ -171,7 +177,10 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
       </div>}
       {hasPerson && <div className="assigned-detail">
         <button className="text-button" data-detail="person" type="button" onClick={() => select('person')}>For someone<ChevronDown size={16} /></button>
-        <button className="assigned-value" type="button" aria-label={`Remove ${person.newName || personName(person.id!)}`} onClick={() => setPerson({ id: null, newName: '' })}>{person.newName || personName(person.id!)}<X size={15} aria-hidden="true" /></button>
+        <div className="assigned-values">
+          {person.ids.map(id => <button key={id} className="assigned-value" type="button" aria-label={`Remove ${personName(id)}`} onClick={() => setPerson({ ...person, ids: person.ids.filter(value => value !== id) })}>{personName(id)}<X size={15} aria-hidden="true" /></button>)}
+          {person.newPeople.map(({ name }) => <button key={name} className="assigned-value" type="button" aria-label={`Remove ${name}`} onClick={() => setPerson({ ...person, newPeople: person.newPeople.filter(entry => entry.name !== name) })}>{name}<X size={15} aria-hidden="true" /></button>)}
+        </div>
       </div>}
       {hasQuantity && <label className="field">Quantity<input maxLength={100} data-detail="quantity" value={draft.quantity} onChange={event => changeDraft('quantity', event.target.value)} /></label>}
       {hasSection && <label className="field">Section<select data-detail="section" value={draft.sectionId || ''} onChange={event => changeDraft('sectionId', event.target.value || null)}>
@@ -179,17 +188,17 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
       </select>{list.sections.length === 0 && <span className="field-help">Add a section from List actions to group items.</span>}</label>}
       {choices.length > 0 && <button className="text-button add-detail" data-detail="add-detail" type="button" onClick={() => { returnFocus.current = 'add-detail'; setSurface('details'); }}><Plus size={17} />Add detail</button>}
       {missingPlaces.map(id => <p className="field-error" role="alert" key={id}>{placeName(id)} is no longer available. Choose another or remove it.</p>)}
-      {missingPerson && <p className="field-error" role="alert">{personName(missingPerson)} is no longer available. Choose another or remove it.</p>}
+      {missingPeople.map(id => <p className="field-error" role="alert" key={id}>{personName(id)} is no longer available. Choose another or remove them.</p>)}
       {missingSection && <p className="field-error" role="alert">This section is no longer available. Choose another or move the item to Unsectioned.</p>}
       {(placeConflict || personConflict) && <div className="detail-conflict" role="alert">
         <p>Someone changed this item while you were editing.</p>
         {placeConflict && <p>Current places: {describePlaces(currentPlace)}</p>}
-        {personConflict && <p>Current person: {currentPerson ? personName(currentPerson) : 'Not set'}</p>}
-        <button type="button" className="text-button" onClick={() => { setSource({ ...source, availability: currentPlace, recipientId: currentPerson }); clearError(); }}>Keep my changes</button>
+        {personConflict && <p>Current people: {currentPersonIds.map(personName).join(', ') || 'Not set'}</p>}
+        <button type="button" className="text-button" onClick={() => { setSource({ ...source, availability: currentPlace, recipientId: null, recipientIds: currentPersonIds }); clearError(); }}>Keep my changes</button>
         <button type="button" className="text-button" onClick={() => {
           if (placeConflict) setPlace({ availability: currentPlace, newPlaces: [] });
-          if (personConflict) setPerson({ id: currentPerson, newName: '' });
-          setSource({ ...source, availability: currentPlace, recipientId: currentPerson });
+          if (personConflict) setPerson({ ids: currentPersonIds, newPeople: [] });
+          setSource({ ...source, availability: currentPlace, recipientId: null, recipientIds: currentPersonIds });
           clearError();
         }}>Use current details</button>
       </div>}
@@ -199,11 +208,11 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
         {filtered ? <div className="reorder-controls"><p className="small-muted">Show all items to edit their order.</p><button type="button" className="secondary" onClick={showFullOrder}>Edit order</button></div> : <div className="reorder-controls">
           <button type="button" className="secondary" disabled={move.targetIndex(-1) === null} onClick={async () => {
             const result = await mutate('item.move', { listId: list.id, itemId: current!.id, sectionId: current!.sectionId, index: move.targetIndex(-1), ...orderGuard(list) });
-            if (result) setOrderSnapshot(result.lists.find(entry => entry.id === list.id)?.orderToken);
+            if (result) { setOrderSnapshot(result.lists.find(entry => entry.id === list.id)?.orderToken); useManualOrder(); }
           }}><ArrowUp size={16} />Move up</button>
           <button type="button" className="secondary" disabled={move.targetIndex(1) === null} onClick={async () => {
             const result = await mutate('item.move', { listId: list.id, itemId: current!.id, sectionId: current!.sectionId, index: move.targetIndex(1), ...orderGuard(list) });
-            if (result) setOrderSnapshot(result.lists.find(entry => entry.id === list.id)?.orderToken);
+            if (result) { setOrderSnapshot(result.lists.find(entry => entry.id === list.id)?.orderToken); useManualOrder(); }
           }}><ArrowDown size={16} />Move down</button>
         </div>}
         <div className="item-tool-actions">
@@ -222,12 +231,18 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
     setSource(copied);
     setOrderSnapshot(list.orderToken);
     setStartedForSomeone(forAnotherPerson);
-    if (forAnotherPerson) { setPerson({ id: null, newName: '' }); setSurface('person'); }
+    if (forAnotherPerson) { setPerson(emptyPeople); setSurface('person'); }
     else input.current?.focus();
   }
 }
 
-function PlacesPicker({ initial, entries, back, done }: { initial: PlaceDraft; entries: NonNullable<GatherList['places']>; back: () => void; done: (value: PlaceDraft) => void }) {
+export function PlacesPicker({ initial, entries, back, done, bulk }: {
+  initial: PlaceDraft;
+  entries: NonNullable<GatherList['places']>;
+  back: () => void;
+  done: (value: PlaceDraft) => void;
+  bulk?: { count: number; anywhere: number };
+}) {
   const [draft, setDraft] = useState(initial);
   const [query, setQuery] = useState('');
   const [creation, setCreation] = useState<PlaceFields | null>(null);
@@ -264,13 +279,16 @@ function PlacesPicker({ initial, entries, back, done }: { initial: PlaceDraft; e
     <div className="dialog-actions"><button type="button" className="secondary" onClick={() => { setCreation(null); setError(''); }}>Cancel</button><button className="primary">Add place</button></div>
   </form>;
   return <>
-    <p className="dialog-copy">Any one of these places works.</p>
+    <p className="dialog-copy">{bulk ? 'Keeps existing named places.' : 'Any one of these places works.'}</p>
+    {bulk && bulk.anywhere > 0 && <p className="bulk-place-notice">
+      {bulk.anywhere} {bulk.anywhere === 1 ? 'item marked Anywhere will use' : 'items marked Anywhere will use'} the selected places instead.
+    </p>}
     {error && <div className="dialog-error" role="alert">{error}</div>}
-    <label className="field">Search places<input ref={search} autoFocus maxLength={100} value={query} onChange={event => { setQuery(event.target.value); setError(''); setDistinguish(false); }} /></label>
-    <div className="availability-choices">
+    <label className="field">{bulk ? 'Search or add a place' : 'Search places'}<input ref={search} autoFocus maxLength={100} value={query} onChange={event => { setQuery(event.target.value); setError(''); setDistinguish(false); }} /></label>
+    {!bulk && <div className="availability-choices">
       <button type="button" className={`secondary ${draft.availability.mode === 'unassigned' ? 'choice-active' : ''}`} aria-pressed={draft.availability.mode === 'unassigned'} onClick={() => setDraft({ availability: noAvailability, newPlaces: [] })}>No places set</button>
       <button type="button" className={`secondary ${draft.availability.mode === 'anywhere' ? 'choice-active' : ''}`} aria-pressed={draft.availability.mode === 'anywhere'} onClick={() => setDraft({ availability: { mode: 'anywhere', placeIds: [] }, newPlaces: [] })}>Anywhere</button>
-    </div>
+    </div>}
     {(options.length > 0 || draft.newPlaces.length > 0) && <div className="organization-choice-list">
       {options.map(entry => <label className="organization-choice" key={entry.id}><input type="checkbox" checked={draft.availability.placeIds.includes(entry.id)} onChange={() => toggle(entry.id)} /><span>{placeLabel(entry)}</span></label>)}
       {draft.newPlaces.map((entry, index) => <label className="organization-choice" key={index}><input type="checkbox" checked onChange={() => {
@@ -280,30 +298,59 @@ function PlacesPicker({ initial, entries, back, done }: { initial: PlaceDraft; e
     </div>}
     {normalizeName(query) && <button type="button" className="text-button" onClick={() => create({ ...emptyPlaceFields, name: query })}><Plus size={16} />Create “{normalizeName(query)}”</button>}
     {distinguish && <button type="button" className="text-button distinguish-place" onClick={() => { setCreation({ ...emptyPlaceFields, name: normalizeName(query) }); setError(''); }}>Add a different place</button>}
-    <div className="dialog-actions"><PickerBack back={back} /><button type="button" className="primary" onClick={() => done(draft)}>Done</button></div>
+    <div className="dialog-actions">{bulk ? <button type="button" className="secondary" onClick={back}>Cancel</button> : <PickerBack back={back} />}
+      <button type="button" className="primary" disabled={Boolean(bulk && (!bulk.count || !draft.availability.placeIds.length && !draft.newPlaces.length))} onClick={() => done(draft)}>
+        {bulk ? `Add to ${bulk.count} ${bulk.count === 1 ? 'item' : 'items'}` : 'Done'}
+      </button>
+    </div>
   </>;
 }
 
-function PersonPicker({ initial, people, forSomeone, back, done }: { initial: PersonDraft; people: NonNullable<GatherList['recipients']>; forSomeone: boolean; back: () => void; done: (value: PersonDraft) => void }) {
+export function PersonPicker({ initial = emptyPeople, people, itemText, requireChoice, bulkCount, back, done }: {
+  initial?: PersonDraft;
+  people: NonNullable<GatherList['recipients']>;
+  itemText?: string;
+  requireChoice?: boolean;
+  bulkCount?: number;
+  back: () => void;
+  done: (value: PersonDraft) => void;
+}) {
   const [draft, setDraft] = useState(initial);
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
-  const field = useId();
+  const search = useRef<HTMLInputElement>(null);
   const name = normalizeName(query);
-  const options = people.filter(entry => nameKey(entry.name).includes(nameKey(name)) || entry.id === draft.id);
-  const selected = draft.id ? `person:${draft.id}` : draft.newName ? 'new' : '';
+  const options = people.filter(entry => nameKey(entry.name).includes(nameKey(name)) || draft.ids.includes(entry.id));
+  const selected = draft.ids.length + draft.newPeople.length;
+  const isBulk = bulkCount !== undefined;
+  const nameExists = people.some(entry => nameKey(entry.name) === nameKey(name)) || draft.newPeople.some(entry => nameKey(entry.name) === nameKey(name));
+  const toggle = (id: string) => {
+    if (!draft.ids.includes(id) && selected >= 25) { setError('Choose up to 25 people.'); return; }
+    setDraft({ ...draft, ids: draft.ids.includes(id) ? draft.ids.filter(value => value !== id) : [...draft.ids, id] });
+    setError('');
+  };
   return <>
-    <p className="dialog-copy">{forSomeone ? 'Who is this item for?' : 'Who this item is for'}</p>
+    <p className="dialog-copy">{isBulk ? 'Keeps existing people on the selected items.' : itemText}</p>
     {error && <div className="dialog-error" role="alert">{error}</div>}
-    <label htmlFor={field} className="field">Search people<input id={field} autoFocus maxLength={100} value={query} onChange={event => { setQuery(event.target.value); setError(''); }} /></label>
-    {(options.length > 0 || Boolean(draft.newName)) && <RadioChoices label="People" value={selected} options={[
-      ...options.map(entry => ({ value: `person:${entry.id}`, label: entry.name })), ...(draft.newName ? [{ value: 'new', label: draft.newName }] : []),
-    ]} choose={value => { if (value !== 'new') setDraft({ id: value.slice(7), newName: '' }); setError(''); }} />}
-    {name && <button type="button" className="text-button" onClick={() => {
-      if (people.some(entry => nameKey(entry.name) === nameKey(name))) { setError('This name already exists. Choose it instead.'); return; }
-      setDraft({ id: null, newName: name }); setQuery(''); setError('');
+    <label className="field">Search or add a name<input ref={search} autoFocus maxLength={100} value={query} onChange={event => { setQuery(event.target.value); setError(''); }} /></label>
+    {(options.length > 0 || draft.newPeople.length > 0) && <div className="organization-choice-list">
+      {options.map(entry => <label className="organization-choice" key={entry.id}>
+        <input type="checkbox" checked={draft.ids.includes(entry.id)} onChange={() => toggle(entry.id)} /><span>{entry.name}</span>
+      </label>)}
+      {draft.newPeople.map(({ name }) => <label className="organization-choice" key={name}>
+        <input type="checkbox" checked onChange={() => { setDraft({ ...draft, newPeople: draft.newPeople.filter(entry => entry.name !== name) }); setError(''); }} /><span>{name}</span>
+      </label>)}
+    </div>}
+    {name && !nameExists && <button type="button" className="text-button" onClick={() => {
+      if (selected >= 25) { setError('Choose up to 25 people.'); return; }
+      setDraft({ ...draft, newPeople: [...draft.newPeople, { name }] });
+      setQuery(''); setError('');
+      search.current?.focus();
     }}><Plus size={16} />Create “{name}”</button>}
-    {selected && <button type="button" className="text-button" onClick={() => setDraft({ id: null, newName: '' })}>Remove person</button>}
-    <div className="dialog-actions"><PickerBack back={back} /><button type="button" className="primary" disabled={forSomeone && !selected} onClick={() => done(draft)}>Done</button></div>
+    <div className="dialog-actions"><button type="button" className="secondary" onClick={back}>Cancel</button>
+      <button type="button" className="primary" disabled={bulkCount === 0 || Boolean((isBulk || requireChoice) && !selected)} onClick={() => done(draft)}>
+        {isBulk ? `Add to ${bulkCount} ${bulkCount === 1 ? 'item' : 'items'}` : 'Done'}
+      </button>
+    </div>
   </>;
 }

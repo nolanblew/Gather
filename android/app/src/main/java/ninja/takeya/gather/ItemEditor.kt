@@ -16,8 +16,6 @@ import kotlinx.coroutines.launch
 
 private enum class ItemPanel { Item, AddDetail, Places, Person, Section, Order }
 
-private const val MAX_PLACE_SELECTIONS = 25
-
 @Composable
 fun ItemForm(
     editor: Editor.ItemForm,
@@ -39,15 +37,16 @@ fun ItemForm(
     var availability by rememberEditorDraft("availability") {
         original?.availability ?: editor.filter.draftAvailability()
     }
-    var recipient by rememberEditorDraft("recipient") {
-        if (original != null) original.recipientId else editor.filter.person.takeUnless { it == FILTER_UNSET }
+    var recipients by rememberEditorDraft("recipients") {
+        original?.peopleIds ?: listOfNotNull(editor.filter.person.takeUnless { it == FILTER_UNSET })
     }
     var expectedAvailability by rememberEditorDraft("expected-availability") {
         original?.availability ?: Availability()
     }
-    var expectedRecipient by rememberEditorDraft("expected-recipient") { original?.recipientId }
+    var expectedRecipients by rememberEditorDraft("expected-recipients") { original?.peopleIds.orEmpty() }
     var newPlaces by rememberEditorDraft("new-places") { emptyList<String>() }
-    var newPerson by rememberEditorDraft<String?>("new-person") { null }
+    var newPeople by rememberEditorDraft("new-people") { emptyList<String>() }
+    var personPickerBaseline by rememberEditorDraft("person-picker-baseline") { recipients to newPeople }
     var descriptionVisible by rememberEditorDraft("description-visible") { note.isNotBlank() }
     var quantityVisible by rememberEditorDraft("quantity-visible") { quantity.isNotBlank() }
     var sectionVisible by rememberEditorDraft("section-visible") { section.isNotBlank() }
@@ -56,6 +55,7 @@ fun ItemForm(
     var actions by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val select = { next: ItemPanel ->
+        if (next == ItemPanel.Person) personPickerBaseline = recipients to newPeople
         search = ""
         panel = next
         scope.launch { model.ui.editorScroll.scrollTo(0) }
@@ -63,9 +63,10 @@ fun ItemForm(
     }
     val enabled = !state.busy
     val organization = state.workspace.version >= 3
+    val multiplePeople = state.workspace.version >= 4
     val placesVisible = availability.mode != "unassigned" ||
         (original == null && editor.filter.place == FILTER_UNSET)
-    val personVisible = recipient != null || newPerson != null ||
+    val personVisible = recipients.isNotEmpty() || newPeople.isNotEmpty() ||
         (original == null && editor.filter.person == FILTER_UNSET)
     val placeName = { id: String ->
         (list.places.find { it.id == id } ?: editor.list.places.find { it.id == id })?.label
@@ -76,16 +77,16 @@ fun ItemForm(
             ?: "Person"
     }
     val missingPlaces = availability.placeIds.filter { id -> list.places.none { it.id == id } }
-    val missingRecipient = recipient?.takeIf { id -> list.recipients.none { it.id == id } }
+    val missingRecipients = recipients.filter { id -> list.recipients.none { it.id == id } }
     val missingSection = section.isNotBlank() && list.sections.none { it.id == section }
     val changingPlaces = !availability.equivalent(expectedAvailability) || newPlaces.isNotEmpty()
-    val changingPerson = recipient != expectedRecipient || newPerson != null
+    val changingPerson = recipients.toSet() != expectedRecipients.toSet() || newPeople.isNotEmpty()
     val changingSection = section.ifBlank { null } != item?.sectionId
     val placesConflict =
         item != null && latest != null && changingPlaces &&
             !latest.availability.equivalent(expectedAvailability)
     val personConflict =
-        item != null && latest != null && changingPerson && latest.recipientId != expectedRecipient
+        item != null && latest != null && changingPerson && latest.peopleIds.toSet() != expectedRecipients.toSet()
 
     when (panel) {
         ItemPanel.AddDetail -> {
@@ -173,37 +174,39 @@ fun ItemForm(
             DoneButton { select(ItemPanel.Item) }
         }
         ItemPanel.Person -> {
-            SheetHeader("For someone", if (needsPerson) "Who is this item for?" else "Who this item is for")
-            FormText(search, { search = it }, "Search people", 100)
-            val query = normalizeLabel(search)
+            SheetHeader("For someone", text.ifBlank { "Who is this item for?" })
             val sorted = list.recipients.sortedWith(
-                compareByDescending<Recipient> { it.id == recipient }
-                    .thenByDescending { person -> list.items.count { it.recipientId == person.id } }
+                compareByDescending<Recipient> { it.id in recipients }
+                    .thenByDescending { person -> list.items.count { person.id in it.peopleIds } }
                     .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
             )
-            if (query.isBlank() && (recipient != null || newPerson != null)) {
-                DetailChoice("Remove person") {
-                    recipient = null
-                    newPerson = null
+            AssignmentOptions(
+                search, { search = it }, "Search people", sorted.map { it.id to it.name },
+                recipients, newPeople, single = !multiplePeople,
+                clearLabel = "Remove person".takeUnless { multiplePeople },
+                enabled = enabled,
+                onChange = { ids, names ->
+                    recipients = ids
+                    newPeople = names
+                },
+            )
+            missingRecipients.forEach { id ->
+                DetailChoice("Remove ${personName(id)}", "This person is no longer available.") {
+                    recipients = recipients - id
                 }
             }
-            sorted.filter { it.name.contains(query, ignoreCase = true) }.forEach { person ->
-                SelectionRow(person.name, recipient == person.id, single = true) {
-                    recipient = person.id
-                    newPerson = null
+            if (multiplePeople) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = {
+                        recipients = personPickerBaseline.first
+                        newPeople = personPickerBaseline.second
+                        select(ItemPanel.Item)
+                    }, modifier = Modifier.weight(1f)) { Text("Cancel") }
+                    Button(onClick = { select(ItemPanel.Item) }, modifier = Modifier.weight(1f)) { Text("Done") }
                 }
+            } else {
+                DoneButton { select(ItemPanel.Item) }
             }
-            newPerson?.takeIf { it.contains(query, ignoreCase = true) }?.let { name ->
-                SelectionRow(name, true, single = true) {}
-            }
-            if (query.isNotBlank() && sorted.none { it.name.equals(query, ignoreCase = true) } &&
-                newPerson?.equals(query, ignoreCase = true) != true
-            ) DetailChoice("Create “$query”") {
-                recipient = null
-                newPerson = query
-                search = ""
-            }
-            DoneButton { select(ItemPanel.Item) }
         }
         ItemPanel.Order -> if (latest != null) {
             SheetHeader("Edit order")
@@ -246,7 +249,7 @@ fun ItemForm(
                 DetailChoice("Places", summary, enabled = enabled) { select(ItemPanel.Places) }
             }
             if (organization && personVisible)
-                DetailChoice("For someone", newPerson ?: recipient?.let(personName) ?: "Not set", enabled = enabled) {
+                DetailChoice("For someone", (recipients.map(personName) + newPeople).joinToString(", ").ifEmpty { "Not set" }, enabled = enabled) {
                     select(ItemPanel.Person)
                 }
             if (quantityVisible) FormText(quantity, { quantity = it }, "Quantity", 100, enabled = enabled)
@@ -258,7 +261,7 @@ fun ItemForm(
                     enabled,
                 ) { section = it }
             missingPlaces.forEach { DraftWarning("${placeName(it)} is no longer available. Choose another or remove it.") }
-            missingRecipient?.let { DraftWarning("${personName(it)} is no longer available. Choose another or remove it.") }
+            missingRecipients.forEach { DraftWarning("${personName(it)} is no longer available. Choose another or remove it.") }
             if (missingSection) DraftWarning("This section is no longer available. Choose another or remove it.")
             if (placesConflict) {
                 val saved = latest.availability.placeIds.joinToString(" or ", transform = placeName)
@@ -272,13 +275,14 @@ fun ItemForm(
                 DetailChoice("Keep my places") { expectedAvailability = latest.availability }
             }
             if (personConflict) {
-                DraftWarning("For someone changed to ${latest.recipientId?.let(personName) ?: "Not set"}.")
-                DetailChoice("Use saved person") {
-                    expectedRecipient = latest.recipientId
-                    recipient = latest.recipientId
-                    newPerson = null
+                val saved = latest.peopleIds.joinToString(", ", transform = personName).ifEmpty { "Not set" }
+                DraftWarning("For someone changed to $saved.")
+                DetailChoice(if (multiplePeople) "Use saved people" else "Use saved person") {
+                    expectedRecipients = latest.peopleIds
+                    recipients = latest.peopleIds
+                    newPeople = emptyList()
                 }
-                DetailChoice("Keep my person") { expectedRecipient = latest.recipientId }
+                DetailChoice(if (multiplePeople) "Keep my people" else "Keep my person") { expectedRecipients = latest.peopleIds }
             }
             val hasMoreDetails = !descriptionVisible || !quantityVisible || !sectionVisible ||
                 (organization && (!placesVisible || !personVisible))
@@ -292,17 +296,19 @@ fun ItemForm(
                 state,
                 "Save",
                 text.isNotBlank() && (missingPlaces.isEmpty() || (item != null && !changingPlaces)) &&
-                    (missingRecipient == null || (item != null && !changingPerson)) &&
+                    (missingRecipients.isEmpty() || (item != null && !changingPerson)) &&
                     (!missingSection || (item != null && !changingSection)) && !placesConflict && !personConflict &&
-                    (!needsPerson || recipient != null || newPerson != null),
+                    (!needsPerson || recipients.isNotEmpty() || newPeople.isNotEmpty()),
             ) {
+                val action = if (item == null) "item.create" else "item.update"
                 model.action(
-                    if (item == null) "item.create" else "item.update",
+                    if (multiplePeople) "${action}WithPeople" else action,
                     list.itemWritePayload(
                         item, text.trim(), note, quantity, section.ifBlank { null },
-                        availability, recipient, newPlaces, newPerson,
+                        availability, recipients, newPlaces, newPeople,
                         if (item == null) Availability() else expectedAvailability,
-                        if (item == null) null else expectedRecipient,
+                        if (item == null) emptyList() else expectedRecipients,
+                        multiplePeople,
                     ),
                     onSuccess = {
                         if (item == null && editor.initialText.isNotEmpty()) model.ui.itemCapture.remove(list.id)
@@ -319,7 +325,12 @@ fun ItemForm(
                             text = { Text("Edit order") },
                             onClick = {
                                 actions = false
-                                if (model.ui.filters[list.id]?.active == true) {
+                                if (multiplePeople) {
+                                    model.ui.itemSelections.remove(list.id)
+                                    model.ui.reorderListId = list.id
+                                    model.ui.itemToReveal[list.id] = item.id
+                                    dismiss()
+                                } else if (model.ui.filters[list.id]?.active == true) {
                                     confirm(Confirmation("Edit order", "Show all items to edit their order.", "Show all items") {
                                         model.ui.filters.remove(list.id)
                                         model.ui.hiddenSavedItems.remove(list.id)
@@ -339,8 +350,8 @@ fun ItemForm(
                                 actions = false
                                 duplicating = true
                                 needsPerson = true
-                                recipient = null
-                                newPerson = null
+                                recipients = emptyList()
+                                newPeople = emptyList()
                                 select(ItemPanel.Person)
                             })
                         DropdownMenuItem(

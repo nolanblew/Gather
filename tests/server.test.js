@@ -173,8 +173,8 @@ test('organization capabilities and coded order conflicts are exposed through th
   const f = await fixture(t);
   const { value: capabilities } = await f.request('/api/capabilities');
   assert.equal(capabilities.apiVersion, 1);
-  assert.equal(capabilities.workspaceVersion, 3);
-  for (const feature of ['list-organization', 'numbered-lists', 'guarded-order']) assert.ok(capabilities.features.includes(feature));
+  assert.equal(capabilities.workspaceVersion, 4);
+  for (const feature of ['list-organization', 'numbered-lists', 'guarded-order', 'multiple-recipients', 'bulk-assignments', 'visible-item-order']) assert.ok(capabilities.features.includes(feature));
   const created = await f.action('list.create', { title: 'Checklist', numbered: true });
   const list = created.lists.find(entry => entry.id === created.createdListId);
   const submit = payload => f.request('/api/actions', { type: 'item.create', payload: { listId: list.id, text: 'Bring a pen', ...payload } });
@@ -196,7 +196,7 @@ function legacyWorkspace() {
   return workspace;
 }
 function migratedWorkspace(v1) {
-  return {...v1,version:3,lists:v1.lists.map(l=>({...l,kind:'checklist',repeatCadence:'manual'}))};
+  return {...v1,version:4,lists:v1.lists.map(l=>({...l,kind:'checklist',repeatCadence:'manual'}))};
 }
 function writeLegacyDatabase(dir, workspace) {
   const db = new DatabaseSync(join(dir,'gather.sqlite'));
