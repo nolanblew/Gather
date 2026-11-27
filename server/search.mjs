@@ -78,6 +78,11 @@ export function searchChunks(workspace) {
       add('item', sectionContext + item.text, item.id, item.sectionId);
       add('note', sectionContext + (item.note || ''), item.id, item.sectionId);
       add('quantity', item.quantity, item.id, item.sectionId);
+      const description = item.description?.map(block => block.type === 'image'
+        ? block.alt ?? ''
+        : block.runs.map(run => run.text).join('')).join('\n');
+      add('description', description, item.id, item.sectionId);
+      add('subitem', item.subitems?.map(subitem => subitem.text).join('\n'), item.id, item.sectionId);
     }
   }
   return result;

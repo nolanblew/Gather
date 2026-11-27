@@ -4,10 +4,11 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer } from '../server/index.js';
-import { createStore, WORKSPACE_BYTE_LIMIT } from '../server/store.mjs';
+import { createStore, createUserStore, WORKSPACE_BYTE_LIMIT } from '../server/store.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { seedWorkspace } from '../server/seed.mjs';
-import { scryptSync } from 'node:crypto';
+import { createHash, randomBytes, scryptSync } from 'node:crypto';
+import sharp from 'sharp';
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'gather-test-'));
@@ -30,6 +31,152 @@ async function fixture(t) {
   const action = async (type, payload = {}) => { const response = await request('/api/actions',{type,payload}); assert.equal(response.status,200,JSON.stringify(response.value)); return response.value; };
   return { dir, request, action, restart: async () => { await stop(); server = await startServer({ dataDir:dir,port:0,searchEnv:{SEARCH_PROVIDER:'fuzzy'},authEnv }); base = `http://127.0.0.1:${server.address().port}`; } };
 }
+
+test('rich item descriptions round-trip with safe images and independently editable subitems', async t => {
+  const f = await fixture(t);
+  const capabilities = (await f.request('/api/capabilities')).value.features;
+  assert.ok(capabilities.includes('item-descriptions') && capabilities.includes('checklist-subitems'));
+  const { createdListId: listId } = await f.action('list.create', { title: 'Weeknight cooking' });
+  const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: '#345678' } }).png().toBuffer();
+  const picture = 'data:image/png;base64,' + png.toString('base64');
+  const blocks = [
+    { type: 'paragraph', runs: [{ text: 'Open the dinner list', bold: true, strike: true, link: { type: 'list', listId } }] },
+    { type: 'bullet', runs: [{ text: 'Look for a meyer lemon', italic: true }] },
+    { type: 'numbered', runs: [{ text: 'See the recipe', underline: true, link: { type: 'external', url: 'https://example.com/recipe' } }] },
+    { type: 'checkbox', runs: [{ text: 'Weigh the batter' }], checked: true },
+    { type: 'image', display: 'inline', dataUrl: picture, alt: 'Original cake recipe' },
+    { type: 'image', display: 'attachment', dataUrl: picture },
+  ];
+  const subitems = [{ id: 'mix', text: 'Mix the batter', checked: false }, { id: 'pan', text: 'Grease the springform', checked: true }];
+  const created = await f.action('item.createWithPeople', { listId, text: 'Cake', note: 'From Grandma', checked: true, subitems, description: blocks });
+  const itemId = created.createdItemId;
+  const itemIn = workspace => workspace.lists.find(list => list.id === listId).items.find(item => item.id === itemId);
+  const payload = { listId, itemId };
+  const first = itemIn(created);
+  assert.equal(first.note, 'From Grandma');
+  assert.deepEqual(first.subitems, subitems);
+  assert.deepEqual(first.description.slice(0, 4), blocks.slice(0, 4));
+  assert.deepEqual(first.description.slice(4).map(block => block.display), ['inline', 'attachment']);
+  assert.match(first.description[4].dataUrl, /^data:image\/webp;base64,/);
+  const digest = value => createHash('sha256').update(value).digest('hex');
+  assert.deepEqual(created.resolvedImages, { [digest(picture)]: digest(first.description[4].dataUrl) });
+  assert.equal((await sharp(Buffer.from(first.description[4].dataUrl.split(',')[1], 'base64')).metadata()).width, 2);
+
+  const renamed = await f.action('subitem.update', { ...payload, subitemId: 'mix', text: 'Mix gently' });
+  const mixed = await f.action('subitem.update', { ...payload, subitemId: 'mix', checked: true });
+  assert.equal(itemIn(renamed).subitems[0].checked, false);
+  assert.deepEqual(itemIn(mixed).subitems[0], { id: 'mix', text: 'Mix gently', checked: true });
+  const stale = await f.request('/api/actions', { type: 'item.update', payload: { ...payload, text: 'Wrong title', subitems, expectedSubitems: subitems } });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.value.code, 'SUBITEMS_CHANGED');
+
+  const description = [...first.description, { type: 'paragraph', runs: [{ text: 'Bake at 350 degrees' }] }];
+  const updated = await f.action('item.updateDescription', { ...payload, description, expectedDescription: first.description });
+  assert.deepEqual(itemIn(updated).description, description);
+  assert.equal(itemIn(updated).text, 'Cake');
+  assert.equal(itemIn(updated).subitems[0].checked, true);
+  const staleDescription = await f.request('/api/actions', { type: 'item.updateDescription', payload: { ...payload, description: [], expectedDescription: first.description } });
+  assert.equal(staleDescription.status, 409);
+  assert.equal(staleDescription.value.code, 'DESCRIPTION_CHANGED');
+  const badLink = [{ type: 'paragraph', runs: [{ text: 'bad', link: { type: 'external', url: 'javascript:alert(1)' } }] }];
+  const badImage = [{ type: 'image', display: 'inline', dataUrl: 'data:image/png;base64,' + png.subarray(0, 8).toString('base64') }];
+  for (const bad of [badLink, badImage]) {
+    const invalid = await f.request('/api/actions', { type: 'item.updateDescription', payload: { ...payload, description: bad, expectedDescription: description } });
+    assert.equal(invalid.status, 400);
+  }
+  const moved = await f.action('subitem.move', { ...payload, subitemId: 'pan', index: 0, expectedSubitemIds: ['mix', 'pan'] });
+  assert.deepEqual(itemIn(moved).subitems.map(subitem => subitem.id), ['pan', 'mix']);
+
+  const search = await f.request('/api/search', { query: 'springform' });
+  assert.equal(search.value.results[0].match.itemId, itemId);
+  const backup = (await f.request('/api/export')).value;
+  const restored = await f.request('/api/import', backup);
+  assert.equal(restored.status, 200);
+  const copy = restored.value.lists.find(list => list.id !== listId && list.title === 'Weeknight cooking');
+  assert.equal(copy.items[0].description[0].runs[0].link.listId, copy.id);
+  assert.equal(copy.items[0].description[4].dataUrl, first.description[4].dataUrl);
+  assert.ok(copy.items[0].subitems.every(subitem => subitem.checked));
+  assert.notEqual(copy.items[0].subitems[0].id, 'pan');
+
+  const offlineImport = {
+    type: 'workspace.import',
+    operationId: 'import-photos-offline',
+    payload: {
+      workspace: { version: 4, categories: [], lists: backup.lists.filter(list => list.id === listId) },
+      contentIds: { [listId]: 'imported-list', [itemId]: 'imported-item', pan: 'imported-pan' },
+    },
+  };
+  const imported = await f.request('/api/actions', offlineImport);
+  assert.equal(imported.status, 200);
+  const importedList = imported.value.lists.find(list => list.id === 'imported-list');
+  assert.equal(importedList.items[0].id, 'imported-item');
+  assert.equal(importedList.items[0].subitems[0].id, 'imported-pan');
+  assert.equal(importedList.items[0].description[0].runs[0].link.listId, 'imported-list');
+  await f.action('item.update', { listId: 'imported-list', itemId: 'imported-item', text: 'Offline cake' });
+  const replay = await f.request('/api/actions', offlineImport);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.value.lists.length, imported.value.lists.length);
+  assert.equal(replay.value.lists.find(list => list.id === 'imported-list').items[0].text, 'Offline cake');
+
+  const clone = await f.action('list.clone', { listId, createdListId: 'private-copy', contentIds: { [itemId]: 'copied-item', pan: 'copied-pan' } });
+  const cloned = clone.lists.find(list => list.id === 'private-copy').items[0];
+  assert.equal(cloned.id, 'copied-item');
+  assert.equal(cloned.subitems[0].id, 'copied-pan');
+  assert.equal(cloned.description[0].runs[0].link.listId, 'private-copy');
+  assert.ok(cloned.subitems.every(subitem => !subitem.checked));
+  assert.ok(itemIn(await f.action('list.reset', { listId })).subitems.every(subitem => !subitem.checked));
+  assert.ok(!Object.hasOwn(itemIn(await f.action('item.updateDescription', { ...payload, description: [], expectedDescription: description })), 'description'));
+});
+
+test('durable offline action receipts handle lost responses, failed guards and revoked access', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'gather-action-replay-'));
+  let store = createUserStore(dir);
+  t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
+  const apply = (userId, type, payload, operationId) => store.action({ type, payload, ...(operationId && { operationId }) }, userId);
+  const listId = 'offline-list', itemId = 'offline-item';
+  const created = apply('owner', 'list.create', { listId, title: 'Offline' }, 'create-list');
+  assert.equal(created.createdListId, listId);
+  const shared = store.invite('owner', listId);
+  store.join('editor', shared.token);
+  const itemCreate = { text: 'First item', itemId, listId };
+  assert.equal(apply('editor', 'item.create', itemCreate, 'create-item').createdItemId, itemId);
+  const afterRestart = { listId, text: itemCreate.text, itemId };
+  store.close();
+  store = createUserStore(dir);
+  assert.equal(apply('editor', 'item.create', afterRestart, 'create-item').createdItemId, itemId);
+  assert.equal(store.get('owner').lists[0].items.length, 1);
+  assert.throws(() => apply('editor', 'item.create', { ...afterRestart, text: 'Different' }, 'create-item'), { status: 409, code: 'OPERATION_ID_REUSED' });
+  assert.throws(() => apply('editor', 'item.updateDescription', { listId, itemId, description: [] }, 'description'), { status: 409, code: 'DESCRIPTION_CHANGED' });
+  assert.ok(apply('editor', 'item.updateDescription', { listId, itemId, description: [], expectedDescription: [] }, 'description'));
+  assert.equal(apply('owner', 'recipient.create', { listId, recipientId: 'current-person', name: 'Alex' }).createdRecipientId, 'current-person');
+  const assigned = apply('editor', 'item.updateWithPeople', { listId, itemId, recipientIds: [], expectedRecipientIds: [], newRecipients: [{ recipientId: 'offline-person', name: 'Alex' }] }, 'assign-person');
+  assert.deepEqual(assigned.resolvedIds, { 'offline-person': 'current-person' });
+  store.remove('owner', listId, 'editor');
+  const replay = apply('editor', 'item.create', itemCreate, 'create-item');
+  assert.equal(replay.createdItemId, itemId);
+  assert.deepEqual(replay.lists, []);
+  assert.throws(() => apply('editor', 'subitem.create', { listId, itemId, text: 'Forbidden' }, 'subitem'), { status: 404 });
+});
+
+test('guarded edits can keep every image on an item near the workspace limit', async t => {
+  const f = await fixture(t);
+  const { createdListId: listId } = await f.action('list.create', { title: 'Photo notes' });
+  const bytes = await sharp(randomBytes(3 * 1000 * 1000), { raw: { width: 1000, height: 1000, channels: 3 } })
+    .webp({ quality: 82 }).toBuffer();
+  const image = { type: 'image', dataUrl: 'data:image/webp;base64,' + bytes.toString('base64'), display: 'inline' };
+  const description = Array(4).fill(image);
+  assert.ok(Buffer.byteLength(JSON.stringify(description)) * 2 > WORKSPACE_BYTE_LIMIT);
+  const { createdItemId: itemId } = await f.action('item.create', { listId, text: 'Images', description });
+  const paragraph = { type: 'paragraph', runs: [{ text: 'Added caption', bold: false }] };
+  const updated = await f.action('item.updateDescription', {
+    listId, itemId,
+    description: [...description, paragraph],
+    expectedDescription: description.map(block => ({ ...block, alt: '' })),
+  });
+  assert.deepEqual(updated.lists.find(list => list.id === listId).items[0].description,
+    [...description, { type: 'paragraph', runs: [{ text: 'Added caption' }] }]);
+});
+
 test('samples seed once, granular concurrent additions persist across restart', async t => {
   const f = await fixture(t);
   const initial = (await f.request('/api/workspace')).value;
