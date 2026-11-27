@@ -168,14 +168,14 @@ jobs:
             exit 1
           else
             # A previous upload may have stopped between the two assets.
-            # Use the published APK when repairing its checksum on a rerun.
+            # Complete the release only with bytes verified by the build job.
             has_asset() {
               jq -e --arg name "$1" 'any(.assets[]; .name == $name and .state == "uploaded")' <<< "$release" > /dev/null
             }
             saved=$(mktemp -d "$RUNNER_TEMP/gather-assets.XXXXXXXX")
             if has_asset "$apk"; then
               gh release download "$RELEASE_TAG" --pattern "$apk" --dir "$saved" --repo "$GITHUB_REPOSITORY"
-              (cd "$saved" && sha256sum "$apk") > "$apk.sha256"
+              cmp "$apk" "$saved/$apk" || { echo "::error::The release already contains a different APK. Rerun the publish job with the original verified artifact."; exit 1; }
             fi
             if has_asset "$apk.sha256"; then
               gh release download "$RELEASE_TAG" --pattern "$apk.sha256" --dir "$saved" --repo "$GITHUB_REPOSITORY"
