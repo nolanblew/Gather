@@ -265,12 +265,16 @@ except (Exception, KeyboardInterrupt):
         except Exception:
             # A failed comparison cannot rule out writes to the candidate.
             compose_up(release)
+            healthcheck()
             raise
         if changed:
-            # The new server may already have accepted a write. Keep it on
-            # the migrated copy so an automatic rollback cannot lose data.
-            compose_up(release)
-            raise RuntimeError('Candidate volume changed after publication; automatic rollback withheld to preserve new writes')
+            message = f'Candidate volume changed after publication; automatic rollback withheld to preserve new writes in {new_volume}'
+            try:
+                compose_up(release)
+                healthcheck()
+            except Exception as error:
+                raise RuntimeError(f'{message}. Check the service in {release}') from error
+            raise RuntimeError(message)
     compose_up(previous)
     healthcheck()
     raise
