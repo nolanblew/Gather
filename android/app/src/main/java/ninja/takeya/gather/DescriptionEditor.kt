@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 
 package ninja.takeya.gather
 
@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -57,6 +58,7 @@ internal fun DescriptionEditor(
     val compositions = remember { mutableStateMapOf<String, TextRange>() }
     var pendingStyle by remember { mutableStateOf<DescriptionRun?>(null) }
     var showListStyles by remember { mutableStateOf(false) }
+    var showBlockOptions by remember { mutableStateOf(false) }
     var linkEntry by remember { mutableStateOf<Pair<String, TextRange>?>(null) }
     var imageDisplay by remember { mutableStateOf("inline") }
     var descriptionError by remember { mutableStateOf<String?>(null) }
@@ -183,118 +185,155 @@ internal fun DescriptionEditor(
         else compositions[entry.id] = nextComposition
     }
 
-    Text("Description", style = MaterialTheme.typography.titleMedium)
-    OutlinedCard(shape = RoundedCornerShape(14.dp)) {
-        FlowRow(Modifier.fillMaxWidth()) {
-            Row {
-                FormatAction(Icons.Outlined.FormatBold, "Bold", active != null && enabled, marked(DescriptionMark.Bold)) { mark(DescriptionMark.Bold) }
-                FormatAction(Icons.Outlined.FormatItalic, "Italic", active != null && enabled, marked(DescriptionMark.Italic)) { mark(DescriptionMark.Italic) }
-                FormatAction(Icons.Outlined.FormatUnderlined, "Underline", active != null && enabled, marked(DescriptionMark.Underline)) { mark(DescriptionMark.Underline) }
-                FormatAction(Icons.Outlined.FormatStrikethrough, "Strikethrough", active != null && enabled, marked(DescriptionMark.Strike)) { mark(DescriptionMark.Strike) }
-            }
-            Row {
-                Box {
-                    FormatAction(Icons.AutoMirrored.Outlined.FormatListBulleted, "List style", enabled && (active != null || canAddBlock)) { showListStyles = true }
-                    DropdownMenu(showListStyles, { showListStyles = false }) {
-                        blockLabels.forEach { (type, label) ->
-                            DropdownMenuItem(
-                                text = { Text(label) },
-                                trailingIcon = if (active?.block?.type == type) {
-                                    { Icon(Icons.Outlined.Check, null) }
-                                } else null,
-                                onClick = {
-                                    showListStyles = false
-                                    makeActive(blockAtSelection(type))
-                                },
-                            )
-                        }
-                    }
-                }
-                FormatAction(Icons.Outlined.Link, "Add or edit link", enabled && (active != null || canAddBlock)) {
-                    val entry = active ?: blockAtSelection("paragraph")
-                    linkEntry = entry.id to selection
-                }
-                FormatAction(Icons.Outlined.Image, "Insert inline image", canAddImage) { pickImage("inline") }
-                FormatAction(Icons.Outlined.AttachFile, "Attach image", canAddImage) { pickImage("attachment") }
-            }
-        }
-        HorizontalDivider()
-        Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp)) {
-            entries.forEachIndexed { index, entry ->
-                val block = entry.block
-                if (block.type == "image" && block.display == "attachment") return@forEachIndexed
-                key(entry.id) {
-                    if (block.type == "image") {
-                        DescriptionImage(block) {
-                            DescriptionBlockOptions(entry, index, entries.size, enabled, change = { option(entry, it) }) { target ->
-                                change(entries.toMutableList().apply { add(target, removeAt(index)) })
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        ItemEditorLabel("Description")
+        Surface(
+            modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            color = MaterialTheme.colorScheme.background,
+        ) {
+            Column {
+                CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        val control = Modifier.weight(1f).height(37.dp)
+                        val marksEnabled = active != null && enabled
+                        FormatAction(Icons.Outlined.FormatBold, "Bold", marksEnabled, control, marked(DescriptionMark.Bold)) { mark(DescriptionMark.Bold) }
+                        FormatAction(Icons.Outlined.FormatItalic, "Italic", marksEnabled, control, marked(DescriptionMark.Italic)) { mark(DescriptionMark.Italic) }
+                        FormatAction(Icons.Outlined.FormatUnderlined, "Underline", marksEnabled, control, marked(DescriptionMark.Underline)) { mark(DescriptionMark.Underline) }
+                        FormatAction(Icons.Outlined.FormatStrikethrough, "Strikethrough", marksEnabled, control, marked(DescriptionMark.Strike)) { mark(DescriptionMark.Strike) }
+                        VerticalDivider(Modifier.height(18.dp))
+                        Box(Modifier.weight(1.15f)) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                FormatAction(
+                                    Icons.AutoMirrored.Outlined.FormatListBulleted, "List style",
+                                    enabled && (active != null || canAddBlock), Modifier.fillMaxWidth().height(37.dp),
+                                    showMenuArrow = true,
+                                ) {
+                                    showListStyles = true
+                                }
+                            }
+                            DropdownMenu(showListStyles, { showListStyles = false }) {
+                                blockLabels.forEach { (type, label) ->
+                                    DropdownMenuItem(
+                                        text = { Text(label) },
+                                        trailingIcon = if (active?.block?.type == type) {
+                                            { Icon(Icons.Outlined.Check, null) }
+                                        } else null,
+                                        onClick = {
+                                            showListStyles = false
+                                            makeActive(blockAtSelection(type))
+                                        },
+                                    )
+                                }
                             }
                         }
-                    } else {
-                        val focus = remember { FocusRequester() }
-                        LaunchedEffect(focusId) {
-                            if (focusId == entry.id) {
-                                focus.requestFocus()
-                                focusId = null
-                            }
+                        VerticalDivider(Modifier.height(18.dp))
+                        FormatAction(Icons.Outlined.Link, "Add or edit link", enabled && (active != null || canAddBlock), control) {
+                            val entry = active ?: blockAtSelection("paragraph")
+                            linkEntry = entry.id to selection
                         }
-                        val current = (selections[entry.id] ?: TextRange.Zero).withinText(block.text.length)
-                        val composition = compositions[entry.id]?.withinText(block.text.length)
-                        Row(verticalAlignment = Alignment.Top) {
-                            when (block.type) {
-                                "bullet" -> Text("•", Modifier.width(18.dp).padding(top = 10.dp))
-                                "numbered" -> Text("${ordinals[index]}.", Modifier.widthIn(min = 22.dp).padding(top = 10.dp, end = 4.dp))
-                                "checkbox" -> Checkbox(block.checked, { update(entry.id, block.copy(checked = it)) }, enabled = enabled)
+                        FormatAction(Icons.Outlined.Image, "Insert inline image", canAddImage, control) { pickImage("inline") }
+                        FormatAction(Icons.Outlined.AttachFile, "Attach image", canAddImage, control) { pickImage("attachment") }
+                        Box(Modifier.weight(.8f)) {
+                            FormatAction(Icons.Outlined.MoreVert, "Description options", enabled, Modifier.fillMaxWidth().height(37.dp)) {
+                                showBlockOptions = true
                             }
-                            BasicTextField(
-                                value = TextFieldValue(block.runs.styledText(primary), selection = current, composition = composition),
-                                onValueChange = { updateText(entry, it, current, composition) },
-                                enabled = enabled,
-                                modifier = Modifier.weight(1f).heightIn(min = 42.dp).padding(vertical = 10.dp)
-                                    .focusRequester(focus).onFocusChanged { if (it.isFocused) makeActive(entry) }
-                                    .testTag(if (entry.id == entries.firstOrNull { it.block.type != "image" }?.id) "field-Description" else "description-block-$index")
-                                    .semantics { contentDescription = if (index == 0) "Description" else "Description block ${index + 1}" },
-                                textStyle = MaterialTheme.typography.bodyMedium.copy(color = fontColor),
-                                cursorBrush = SolidColor(primary),
-                                decorationBox = { inner ->
-                                    Box {
-                                        if (block.text.isEmpty()) {
-                                            Text("Write a description", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                        inner()
+                            DropdownMenu(showBlockOptions, { showBlockOptions = false }) {
+                                listOf("paragraph" to "Add paragraph", "bullet" to "Add bulleted line", "numbered" to "Add numbered line", "checkbox" to "Add checkbox")
+                                    .forEach { (type, label) ->
+                                        DropdownMenuItem(text = { Text(label) }, enabled = canAddBlock, onClick = {
+                                            showBlockOptions = false
+                                            addTextBlock(type)
+                                        })
                                     }
-                                },
-                            )
-                            if (entries.size > 1 || block.type != "paragraph") {
-                                DescriptionBlockOptions(entry, index, entries.size, enabled, change = { option(entry, it) }) { target ->
-                                    change(entries.toMutableList().apply { add(target, removeAt(index)) })
+                                if (active != null) {
+                                    val index = entries.indexOf(active)
+                                    HorizontalDivider()
+                                    if (index > 0) DropdownMenuItem(text = { Text("Move current block up") }, onClick = {
+                                        showBlockOptions = false
+                                        change(entries.toMutableList().apply { add(index - 1, removeAt(index)) })
+                                    })
+                                    if (index < entries.lastIndex) DropdownMenuItem(text = { Text("Move current block down") }, onClick = {
+                                        showBlockOptions = false
+                                        change(entries.toMutableList().apply { add(index + 1, removeAt(index)) })
+                                    })
+                                    DropdownMenuItem(text = { Text("Remove current block") }, onClick = {
+                                        showBlockOptions = false
+                                        option(active, null)
+                                    })
                                 }
                             }
                         }
                     }
                 }
-            }
-            if (preparing) LinearProgressIndicator(Modifier.fillMaxWidth())
-            var adding by remember { mutableStateOf(false) }
-            Box {
-                TextButton(onClick = { adding = true }, enabled = canAddBlock) {
-                    Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Add block")
-                }
-                DropdownMenu(adding, { adding = false }) {
-                    blockLabels.forEach { (type, label) ->
-                        DropdownMenuItem(text = { Text(label) }, onClick = { adding = false; addTextBlock(type) })
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 7.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    entries.forEachIndexed { index, entry ->
+                        val block = entry.block
+                        if (block.type == "image" && block.display == "attachment") return@forEachIndexed
+                        key(entry.id) {
+                            if (block.type == "image") {
+                                DescriptionImage(block, compact = true) {
+                                    DescriptionBlockOptions(entry, index, entries.size, enabled, change = { option(entry, it) }) { target ->
+                                        change(entries.toMutableList().apply { add(target, removeAt(index)) })
+                                    }
+                                }
+                            } else {
+                                val focus = remember { FocusRequester() }
+                                LaunchedEffect(focusId) {
+                                    if (focusId == entry.id) {
+                                        focus.requestFocus()
+                                        focusId = null
+                                    }
+                                }
+                                val current = (selections[entry.id] ?: TextRange.Zero).withinText(block.text.length)
+                                val composition = compositions[entry.id]?.withinText(block.text.length)
+                                Row(verticalAlignment = Alignment.Top) {
+                                    when (block.type) {
+                                        "bullet" -> Text("•", Modifier.width(17.dp))
+                                        "numbered" -> Text("${ordinals[index]}.", Modifier.widthIn(min = 21.dp).padding(end = 4.dp))
+                                        "checkbox" -> CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+                                            Checkbox(block.checked, { update(entry.id, block.copy(checked = it)) }, enabled = enabled,
+                                                modifier = Modifier.size(24.dp).semantics { contentDescription = "Description checkbox: ${block.text}" })
+                                        }
+                                    }
+                                    BasicTextField(
+                                        value = TextFieldValue(block.runs.styledText(primary), selection = current, composition = composition),
+                                        onValueChange = { updateText(entry, it, current, composition) },
+                                        enabled = enabled,
+                                        modifier = Modifier.weight(1f).heightIn(min = 21.dp)
+                                            .focusRequester(focus).onFocusChanged { if (it.isFocused) makeActive(entry) }
+                                            .testTag(if (entry.id == entries.firstOrNull { it.block.type != "image" }?.id) "field-Description" else "description-block-$index")
+                                            .semantics { contentDescription = if (index == 0) "Description" else "Description block ${index + 1}" },
+                                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = fontColor),
+                                        cursorBrush = SolidColor(primary),
+                                        decorationBox = { inner ->
+                                            Box {
+                                                if (block.text.isEmpty()) {
+                                                    Text("Write a description", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                }
+                                                inner()
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
                     }
+                    if (preparing) LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             }
         }
-    }
-    entries.forEachIndexed { index, entry ->
-        if (entry.block.type == "image" && entry.block.display == "attachment") key(entry.id) {
-            DescriptionImage(entry.block) {
-                DescriptionBlockOptions(entry, index, entries.size, enabled, change = { option(entry, it) }) { target ->
-                    change(entries.toMutableList().apply { add(target, removeAt(index)) })
+        entries.forEachIndexed { index, entry ->
+            if (entry.block.type == "image" && entry.block.display == "attachment") key(entry.id) {
+                Spacer(Modifier.height(3.dp))
+                DescriptionImage(entry.block, compact = true) {
+                    DescriptionBlockOptions(entry, index, entries.size, enabled, change = { option(entry, it) }) { target ->
+                        change(entries.toMutableList().apply { add(target, removeAt(index)) })
+                    }
                 }
             }
         }
@@ -343,15 +382,26 @@ private fun List<DescriptionRun>.linkRangeAt(offset: Int): TextRange {
 }
 
 @Composable
-private fun FormatAction(icon: ImageVector, label: String, enabled: Boolean, selected: Boolean? = null, click: () -> Unit) {
-    if (selected == null) IconButton(onClick = click, enabled = enabled) {
-        Icon(icon, label, Modifier.size(20.dp))
+private fun FormatAction(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    modifier: Modifier,
+    selected: Boolean? = null,
+    showMenuArrow: Boolean = false,
+    click: () -> Unit,
+) {
+    if (selected == null) IconButton(onClick = click, enabled = enabled, modifier = modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, label, Modifier.size(18.dp))
+            if (showMenuArrow) Icon(Icons.Outlined.ArrowDropDown, null, Modifier.size(13.dp))
+        }
     } else IconToggleButton(
         checked = selected,
         onCheckedChange = { click() },
-        enabled = enabled,
+        enabled = enabled, modifier = modifier,
         colors = IconButtonDefaults.iconToggleButtonColors(checkedContainerColor = MaterialTheme.colorScheme.primaryContainer),
-    ) { Icon(icon, label, Modifier.size(20.dp)) }
+    ) { Icon(icon, label, Modifier.size(18.dp)) }
 }
 
 @Composable
@@ -368,7 +418,11 @@ private fun DescriptionBlockOptions(
     var menu by remember { mutableStateOf(false) }
     var editAlt by remember { mutableStateOf(false) }
     Box {
-        IconButton(onClick = { menu = true }, enabled = enabled) { Icon(Icons.Outlined.MoreVert, if (image) "Image options" else "Block options") }
+        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+            IconButton(onClick = { menu = true }, enabled = enabled, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Outlined.MoreVert, if (image) "Image options" else "Block options", Modifier.size(18.dp))
+            }
+        }
         DropdownMenu(menu, { menu = false }) {
             if (image) {
                 DropdownMenuItem(text = { Text("Edit alternative text") }, onClick = { menu = false; editAlt = true })

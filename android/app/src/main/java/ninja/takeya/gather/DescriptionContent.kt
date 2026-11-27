@@ -2,6 +2,7 @@ package ninja.takeya.gather
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -97,6 +98,7 @@ internal fun DescriptionContent(
 @Composable
 internal fun DescriptionImage(
     block: DescriptionBlock,
+    compact: Boolean = false,
     actions: (@Composable () -> Unit)? = null,
 ) {
     val dataUrl = block.dataUrl ?: return
@@ -104,23 +106,34 @@ internal fun DescriptionImage(
     val picture = bitmap
     val label = block.alt.orEmpty().ifBlank { if (block.display == "attachment") "Image attachment" else "Description image" }
     var enlarged by remember(dataUrl) { mutableStateOf(false) }
-    val shape = RoundedCornerShape(12.dp)
+    val shape = RoundedCornerShape(if (compact) 8.dp else 12.dp)
     if (block.display == "attachment") {
         OutlinedCard(shape = shape) {
             Row(Modifier.fillMaxWidth().padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Row(
-                    Modifier.weight(1f).clickable(enabled = picture != null) { enlarged = true }.heightIn(min = 48.dp),
+                    Modifier.weight(1f).clickable(enabled = picture != null) { enlarged = true }.heightIn(min = if (compact) 42.dp else 48.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     if (picture != null) Image(
-                        picture.asImageBitmap(), null, Modifier.size(width = 52.dp, height = 36.dp).clip(shape),
+                        picture.asImageBitmap(), null, Modifier.size(width = 52.dp, height = if (compact) 30.dp else 36.dp).clip(shape),
                         contentScale = ContentScale.Crop,
                     ) else Icon(Icons.Outlined.Image, null, Modifier.size(24.dp))
-                    Text(label, Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
                 actions?.invoke()
             }
+        }
+    } else if (compact) {
+        Box(Modifier.fillMaxWidth().padding(top = 4.dp).aspectRatio(2.65f).clip(shape)) {
+            if (picture != null) Image(
+                picture.asImageBitmap(), label, Modifier.fillMaxSize().clickable { enlarged = true },
+                contentScale = ContentScale.Crop,
+            ) else Text(label, Modifier.align(Alignment.Center), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (actions != null) Box(
+                Modifier.align(Alignment.TopEnd).padding(4.dp)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = .93f), shape),
+            ) { actions() }
         }
     } else {
         Column {

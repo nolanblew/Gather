@@ -97,9 +97,10 @@ class GatherAcceptanceTest {
 
         compose.onNodeWithText("Add step").performScrollTo().performClick()
         compose.onNodeWithTag("field-Step").performTextInput(step)
-        val stepDialog = isDialog() and hasAnyDescendant(hasTestTag("field-Step"))
-        compose.onNode(hasText("Add step") and hasClickAction() and hasAnyAncestor(stepDialog)).performClick()
+        compose.onNodeWithContentDescription("Save step").performScrollTo().performClick()
         closeSoftKeyboard()
+        compose.onNodeWithTag("editor-save").assertIsDisplayed()
+        compose.onNodeWithText("Unsaved edits").assertIsDisplayed()
         saveEditor()
         awaitStored("rich description and subchecklist") {
             val stored = fixture.item(title, item)
@@ -916,13 +917,14 @@ class GatherAcceptanceTest {
         waitTag("editor-item-text")
         compose.onAllNodesWithText("Quantity").assertCountEquals(0)
         compose.onAllNodesWithText("Places").assertCountEquals(0)
+        clickDescription("Item options")
         click("Add detail")
         captureOrganizationScreenshot("organization-add-detail")
         click("Place")
         editorText("field-Search places", "Cancelled draft")
         click("Create “Cancelled draft”")
         click("Done")
-        click("Cancel")
+        clickDescription("Cancel")
         assertFalse(fixture.list(title)?.optJSONArray("places").toString().contains("Cancelled draft"))
 
         scrollText("1. Tea")
@@ -931,6 +933,7 @@ class GatherAcceptanceTest {
         val description = "Green tea.\n\nLook for a small tin."
         editorText("field-Description", description)
         closeSoftKeyboard()
+        clickDescription("Item options")
         click("Add detail")
         click("Place")
         editorText("field-Search places", "Kyoto")
@@ -938,6 +941,7 @@ class GatherAcceptanceTest {
         editorText("field-Search places", "Tokyo")
         click("Create “Tokyo”")
         click("Done")
+        clickDescription("Item options")
         click("Add detail")
         click("For someone")
         editorText("field-Search people", "Maya")
@@ -959,7 +963,7 @@ class GatherAcceptanceTest {
         click("1. Tea")
         waitTag("field-Description")
         compose.onNodeWithTag("field-Description").assertTextContains(description)
-        click("Cancel")
+        clickDescription("Cancel")
 
         val stored = checkNotNull(fixture.list(title))
         val listId = stored.getString("id")
@@ -1164,7 +1168,10 @@ class GatherAcceptanceTest {
     private fun saveEditor() {
         val submit = hasTestTag("editor-save")
         compose.waitUntil(10_000) { compose.onAllNodes(submit).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNode(submit).performScrollTo().performClick()
+        val button = compose.onNode(submit)
+        if (compose.onAllNodesWithTag("editor-item-text").fetchSemanticsNodes().isNotEmpty()) {
+            button.assertIsDisplayed().performClick()
+        } else button.performScrollTo().performClick()
         compose.waitUntil(20_000) { compose.onAllNodes(submit).fetchSemanticsNodes().isEmpty() }
     }
     private fun waitText(text: String) { compose.waitUntil(20_000) { compose.onAllNodesWithText(text, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() } }

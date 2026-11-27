@@ -1,16 +1,35 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package ninja.takeya.gather
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.util.UUID
 import kotlinx.coroutines.launch
@@ -25,6 +44,7 @@ fun ItemForm(
     model: GatherViewModel,
     dismiss: () -> Unit,
     confirm: (Confirmation) -> Unit,
+    fullScreen: Boolean,
 ) {
     val list = state.workspace.lists.firstOrNull { it.id == editor.list.id } ?: editor.list
     val original = editor.item
@@ -39,6 +59,9 @@ fun ItemForm(
     var descriptionDraft by rememberEditorDraft("description-draft") { descriptionSource }
     var subitemSource by rememberEditorDraft("subitem-source") { original?.subitems.orEmpty() }
     var subitems by rememberEditorDraft("subitems") { subitemSource }
+    var newStep by rememberEditorDraft<Subitem?>("new-step") { null }
+    val completedStep = newStep?.takeIf { it.text.isNotBlank() }?.let { it.copy(text = it.text.trim()) }
+    val stepsToSave = if (completedStep == null) subitems else subitems + completedStep
     var expectedDescription by rememberEditorDraft("expected-description") { original?.description.orEmpty() }
     var expectedNote by rememberEditorDraft("expected-note") { original?.note.orEmpty() }
     var expectedSubitems by rememberEditorDraft("expected-subitems") { original?.subitems.orEmpty() }
@@ -64,7 +87,9 @@ fun ItemForm(
     var search by rememberEditorDraft("detail-search") { "" }
     var actions by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
     val select = { next: ItemPanel ->
+        focusManager.clearFocus()
         if (next == ItemPanel.Person) personPickerBaseline = recipients to newPeople
         search = ""
         panel = next
@@ -99,8 +124,10 @@ fun ItemForm(
             !latest.availability.equivalent(expectedAvailability)
     val personConflict =
         item != null && latest != null && changingPerson && latest.peopleIds.toSet() != expectedRecipients.toSet()
-    val changingDescription = richDescriptions && descriptionDraft.map { it.block } != descriptionSource.map { it.block }
-    val changingSubitems = hasSubchecklist && subitems != subitemSource
+    val descriptionEdits = remember(descriptionDraft) { descriptionDraft.descriptionWrite() }
+    val originalDescription = remember(descriptionSource) { descriptionSource.descriptionWrite() }
+    val changingDescription = richDescriptions && descriptionEdits != originalDescription
+    val changingSubitems = hasSubchecklist && stepsToSave != subitemSource
     val descriptionConflict = item != null && latest != null && changingDescription &&
         (latest.description != expectedDescription || latest.note != expectedNote)
     val subitemConflict = item != null && latest != null && changingSubitems && latest.subitems != expectedSubitems
@@ -112,348 +139,426 @@ fun ItemForm(
         }
     }
 
-    when (panel) {
-        ItemPanel.AddDetail -> {
-            SheetHeader("Add detail")
-            val placeChoice = "Place" to { select(ItemPanel.Places) }
-            val personChoice = "For someone" to { select(ItemPanel.Person) }
-            val choices = buildList {
-                if (organization && !placesVisible && editor.list.usesPlaces) add(placeChoice)
-                if (organization && !personVisible && editor.list.usesRecipients) add(personChoice)
-                if (!descriptionVisible) add("Description" to {
-                    showDescription()
-                    select(ItemPanel.Item)
-                })
-                if (organization && !placesVisible && !editor.list.usesPlaces) add(placeChoice)
-                if (organization && !personVisible && !editor.list.usesRecipients) add(personChoice)
-                if (!quantityVisible) add("Quantity" to {
-                    quantityVisible = true
-                    select(ItemPanel.Item)
-                })
-                if (!sectionVisible)
-                    add("Section" to {
-                        if (list.sections.isEmpty()) select(ItemPanel.Section)
-                        else {
-                            sectionVisible = true
-                            select(ItemPanel.Item)
-                        }
-                    })
-            }
-            choices.forEach { (label, action) ->
-                DetailChoice(label, if (label == "For someone") "Who this item is for" else null, action)
-            }
-            DoneButton { select(ItemPanel.Item) }
-        }
-        ItemPanel.Section -> {
-            SheetHeader("Section", "Add a section from List options to use it here.")
-            DoneButton { select(ItemPanel.Item) }
-        }
-        ItemPanel.Places -> {
-            SheetHeader("Choose places", "Any one of these places works.")
-            FormText(search, { search = it }, "Search places", 100)
-            val query = normalizeLabel(search)
-            val selectionFull = availability.placeIds.size + newPlaces.size >= MAX_PLACE_SELECTIONS
-            if (query.isBlank()) {
-                SelectionRow("Anywhere", availability.mode == "anywhere", single = true) {
-                    availability = Availability("anywhere")
-                    newPlaces = emptyList()
-                }
-                SelectionRow("No places set", availability.mode == "unassigned", single = true) {
-                    availability = Availability()
-                    newPlaces = emptyList()
-                }
-            }
-            fun choosePlaces(ids: List<String>, names: List<String>) {
-                availability = if (ids.isEmpty() && names.isEmpty()) Availability()
-                    else Availability("selected", ids)
-                newPlaces = names
-            }
-            val sorted = list.places.sortedWith(
-                compareByDescending<Place> { it.id in availability.placeIds }
-                    .thenByDescending { place -> list.items.count { place.id in it.availability.placeIds } }
-                    .thenBy(String.CASE_INSENSITIVE_ORDER) { it.label }
-            )
-            sorted.filter { it.label.contains(query, ignoreCase = true) }.forEach { place ->
-                val selected = place.id in availability.placeIds
-                SelectionRow(place.label, selected, enabled = selected || !selectionFull) {
-                    val ids = if (selected) availability.placeIds - place.id else availability.placeIds + place.id
-                    choosePlaces(ids, newPlaces)
-                }
-            }
-            missingPlaces.forEach { id ->
-                DetailChoice("Remove ${placeName(id)}", "This place is no longer available.") {
-                    choosePlaces(availability.placeIds - id, newPlaces)
-                }
-            }
-            newPlaces.filter { it.contains(query, ignoreCase = true) }.forEach { name ->
-                SelectionRow(name, true) { choosePlaces(availability.placeIds, newPlaces - name) }
-            }
-            if (query.isNotBlank() && sorted.none { it.name.equals(query, ignoreCase = true) } &&
-                newPlaces.none { it.equals(query, ignoreCase = true) }
-            ) DetailChoice("Create “$query”", null, enabled = !selectionFull) {
-                choosePlaces(availability.placeIds, newPlaces + query)
-                search = ""
-            }
-            if (selectionFull) Text("You can choose up to $MAX_PLACE_SELECTIONS places.")
-            DoneButton { select(ItemPanel.Item) }
-        }
-        ItemPanel.Person -> {
-            SheetHeader("For someone", text.ifBlank { "Who is this item for?" })
-            val sorted = list.recipients.sortedWith(
-                compareByDescending<Recipient> { it.id in recipients }
-                    .thenByDescending { person -> list.items.count { person.id in it.peopleIds } }
-                    .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
-            )
-            AssignmentOptions(
-                search, { search = it }, "Search people", sorted.map { it.id to it.name },
-                recipients, newPeople, single = !multiplePeople,
-                clearLabel = "Remove person".takeUnless { multiplePeople },
-                enabled = enabled,
-                onChange = { ids, names ->
-                    recipients = ids
-                    newPeople = names
-                },
-            )
-            missingRecipients.forEach { id ->
-                DetailChoice("Remove ${personName(id)}", "This person is no longer available.") {
-                    recipients = recipients - id
-                }
-            }
-            if (multiplePeople) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = {
-                        recipients = personPickerBaseline.first
-                        newPeople = personPickerBaseline.second
-                        select(ItemPanel.Item)
-                    }, modifier = Modifier.weight(1f)) { Text("Cancel") }
-                    Button(onClick = { select(ItemPanel.Item) }, modifier = Modifier.weight(1f)) { Text("Done") }
-                }
-            } else {
-                DoneButton { select(ItemPanel.Item) }
+    val dirty = duplicating || text != original?.text.orEmpty() || quantity != original?.quantity.orEmpty() ||
+        note != expectedNote || changingDescription || changingSubitems || changingPlaces || changingPerson ||
+        section != original?.sectionId.orEmpty()
+    val saveEnabled = panel == ItemPanel.Item && enabled && text.isNotBlank() &&
+        (missingPlaces.isEmpty() || (item != null && !changingPlaces)) &&
+        (missingRecipients.isEmpty() || (item != null && !changingPerson)) &&
+        (!missingSection || (item != null && !changingSection)) && !placesConflict && !personConflict &&
+        !descriptionConflict && !subitemConflict && !preparingImage &&
+        (!needsPerson || recipients.isNotEmpty() || newPeople.isNotEmpty())
+    val save: () -> Unit = {
+        val action = if (item == null) "item.create" else "item.update"
+        val description = descriptionEdits.takeIf { richDescriptions && (item == null || changingDescription) }
+        val fields = list.itemWritePayload(
+                item, text.trim(), description?.note ?: note, quantity, section.ifBlank { null },
+                availability, recipients, newPlaces, newPeople,
+                if (item == null) Availability() else expectedAvailability,
+                if (item == null) emptyList() else expectedRecipients,
+                multiplePeople,
+            ).toMutableMap()
+        if (item != null && description != null) {
+            fields.remove("note")
+            if (description.note != expectedNote) {
+                fields += payload("note" to description.note, "expectedNote" to expectedNote)
             }
         }
-        ItemPanel.Order -> if (latest != null) {
-            SheetHeader("Edit order")
-            val group = sortedGroup(list, latest.sectionId)
-            val index = group.indexOfFirst { it.id == latest.id }
-            val move = { offset: Int ->
-                model.action(
-                    "item.move",
-                    list.orderedPayload("itemId" to latest.id, "sectionId" to latest.sectionId, "index" to index + offset),
-                )
-            }
-            OutlinedButton(onClick = { move(-1) }, enabled = index > 0 && enabled) {
-                Icon(Icons.Outlined.ArrowUpward, null, Modifier.size(18.dp))
-                Text("Move up")
-            }
-            OutlinedButton(
-                onClick = { move(1) },
-                enabled = index in 0 until group.lastIndex && enabled,
-            ) {
-                Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(18.dp))
-                Text("Move down")
-            }
-            DoneButton { select(ItemPanel.Item) }
+        if (description != null && description.blocks != expectedDescription.takeIf { item != null }.orEmpty()) {
+            fields += payload("description" to description.blocks.map { it.toPayload() })
+            if (item != null) fields += payload("expectedDescription" to expectedDescription.map { it.toPayload() })
         }
-        ItemPanel.Item -> {
-            SheetHeader(if (duplicating) "Duplicate item" else if (item == null) "Add item" else "Item details")
-            if (!state.connected && state.canEditWorkspace) {
-                Text("Changes will sync when you reconnect.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (hasSubchecklist && (changingSubitems || item == null && stepsToSave.isNotEmpty())) {
+            fields += payload("subitems" to stepsToSave.map { it.toPayload() })
+            if (item != null) fields += payload("expectedSubitems" to expectedSubitems.map { it.toPayload() })
+        }
+        model.action(
+            if (multiplePeople) "${action}WithPeople" else action,
+            JsonObject(fields),
+            onSuccess = {
+                if (item == null && editor.initialText.isNotEmpty()) model.ui.itemCapture.remove(list.id)
+                model.showSavedItem(list.id, item?.id)
+                dismiss()
+            },
+        )
+    }
+    val back = {
+        if (panel == ItemPanel.Item) dismiss()
+        else {
+            if (panel == ItemPanel.Person && multiplePeople) {
+                recipients = personPickerBaseline.first
+                newPeople = personPickerBaseline.second
             }
-            FormText(text, { text = it }, "Item", 500, false, enabled, minLines = 1)
-            if (descriptionVisible && richDescriptions)
-                DescriptionEditor(descriptionDraft, { descriptionDraft = it }, state.workspace.lists, enabled, preparingImage, { preparingImage = it })
-            else if (descriptionVisible)
-                FormText(note, { note = it }, "Description", 4000, false, enabled, minLines = 2)
-            else TextButton(onClick = ::showDescription, enabled = enabled) {
-                Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Add description")
+            select(if (panel == ItemPanel.Section) ItemPanel.AddDetail else ItemPanel.Item)
+        }
+    }
+    BackHandler(enabled = panel != ItemPanel.Item && !state.busy, onBack = back)
+    val title = when (panel) {
+        ItemPanel.Item -> if (duplicating) "Duplicate item" else if (item == null) "Add item" else "Item details"
+        ItemPanel.AddDetail -> "Add detail"
+        ItemPanel.Places -> "Choose places"
+        ItemPanel.Person -> "For someone"
+        ItemPanel.Section -> "Section"
+        ItemPanel.Order -> "Edit order"
+    }
+    Column {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = 2.dp, end = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            IconButton(onClick = back, enabled = !state.busy, modifier = Modifier.testTag("editor-close")) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, if (panel == ItemPanel.Item) "Cancel" else "Back to item")
             }
-            if (hasSubchecklist) SubchecklistEditor(subitems, enabled) { subitems = it }
-            if (organization && placesVisible) {
-                val names = availability.placeIds.map(placeName) + newPlaces
-                val summary = when (availability.mode) {
-                    "anywhere" -> "Anywhere"
-                    "selected" -> names.joinToString(" or ")
-                    else -> "No places set"
+            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (panel == ItemPanel.Item) {
+                Button(
+                    onClick = save, enabled = saveEnabled,
+                    modifier = Modifier.testTag("editor-save"), shape = RoundedCornerShape(9.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 5.dp),
+                ) {
+                    if (state.busy) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+                    else Text("Save")
                 }
-                DetailChoice("Places", summary, enabled = enabled) { select(ItemPanel.Places) }
-            }
-            if (organization && personVisible)
-                DetailChoice("For someone", (recipients.map(personName) + newPeople).joinToString(", ").ifEmpty { "Not set" }, enabled = enabled) {
-                    select(ItemPanel.Person)
-                }
-            if (quantityVisible) FormText(quantity, { quantity = it }, "Quantity", 100, enabled = enabled)
-            if (sectionVisible)
-                Choice(
-                    "Section",
-                    section,
-                    listOf("" to "Unsectioned") + list.sections.sortedBy { it.position }.map { it.id to it.title },
-                    enabled,
-                ) { section = it }
-            missingPlaces.forEach { DraftWarning("${placeName(it)} is no longer available. Choose another or remove it.") }
-            missingRecipients.forEach { DraftWarning("${personName(it)} is no longer available. Choose another or remove it.") }
-            if (missingSection) DraftWarning("This section is no longer available. Choose another or remove it.")
-            if (placesConflict) {
-                val saved = latest.availability.placeIds.joinToString(" or ", transform = placeName)
-                    .ifEmpty { if (latest.availability.mode == "anywhere") "Anywhere" else "No places set" }
-                DraftWarning("Places changed to $saved.")
-                DetailChoice("Use saved places") {
-                    expectedAvailability = latest.availability
-                    availability = latest.availability
-                    newPlaces = emptyList()
-                }
-                DetailChoice("Keep my places") { expectedAvailability = latest.availability }
-            }
-            if (personConflict) {
-                val saved = latest.peopleIds.joinToString(", ", transform = personName).ifEmpty { "Not set" }
-                DraftWarning("For someone changed to $saved.")
-                DetailChoice(if (multiplePeople) "Use saved people" else "Use saved person") {
-                    expectedRecipients = latest.peopleIds
-                    recipients = latest.peopleIds
-                    newPeople = emptyList()
-                }
-                DetailChoice(if (multiplePeople) "Keep my people" else "Keep my person") { expectedRecipients = latest.peopleIds }
-            }
-            if (descriptionConflict) {
-                DraftWarning("The description changed while you were editing.")
-                DetailChoice("Use saved description") {
-                    expectedDescription = latest.description
-                    expectedNote = latest.note
-                    note = latest.note
-                    descriptionSource = latest.descriptionDraft()
-                    descriptionDraft = descriptionSource
-                    showDescription()
-                }
-                DetailChoice("Keep my description") {
-                    expectedDescription = latest.description
-                    expectedNote = latest.note
-                    note = latest.note
-                }
-            }
-            if (subitemConflict) {
-                DraftWarning("The subchecklist changed while you were editing.")
-                DetailChoice("Use saved steps") {
-                    expectedSubitems = latest.subitems
-                    subitemSource = latest.subitems
-                    subitems = subitemSource
-                }
-                DetailChoice("Keep my steps") { expectedSubitems = latest.subitems }
-            }
-            val hasMoreDetails = !descriptionVisible || !quantityVisible || !sectionVisible ||
-                (organization && (!placesVisible || !personVisible))
-            if (hasMoreDetails)
-                TextButton(onClick = { select(ItemPanel.AddDetail) }, enabled = enabled) {
-                    Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Add detail")
-                }
-            SaveButton(
-                state,
-                if (state.connected) "Save" else "Save on this device",
-                text.isNotBlank() && (missingPlaces.isEmpty() || (item != null && !changingPlaces)) &&
-                    (missingRecipients.isEmpty() || (item != null && !changingPerson)) &&
-                    (!missingSection || (item != null && !changingSection)) && !placesConflict && !personConflict &&
-                    !descriptionConflict && !subitemConflict && !preparingImage &&
-                    (!needsPerson || recipients.isNotEmpty() || newPeople.isNotEmpty()),
-            ) {
-                val action = if (item == null) "item.create" else "item.update"
-                val description = if (richDescriptions && (item == null || changingDescription)) descriptionDraft.descriptionWrite() else null
-                val fields = list.itemWritePayload(
-                        item, text.trim(), description?.note ?: note, quantity, section.ifBlank { null },
-                        availability, recipients, newPlaces, newPeople,
-                        if (item == null) Availability() else expectedAvailability,
-                        if (item == null) emptyList() else expectedRecipients,
-                        multiplePeople,
-                    ).toMutableMap()
-                if (item != null && description != null) {
-                    fields.remove("note")
-                    if (description.note != expectedNote) {
-                        fields += payload("note" to description.note, "expectedNote" to expectedNote)
-                    }
-                }
-                if (description != null && description.blocks != expectedDescription.takeIf { item != null }.orEmpty()) {
-                    fields += payload("description" to description.blocks.map { it.toPayload() })
-                    if (item != null) fields += payload("expectedDescription" to expectedDescription.map { it.toPayload() })
-                }
-                if (hasSubchecklist && (changingSubitems || item == null && subitems.isNotEmpty())) {
-                    fields += payload("subitems" to subitems.map { it.toPayload() })
-                    if (item != null) fields += payload("expectedSubitems" to expectedSubitems.map { it.toPayload() })
-                }
-                model.action(
-                    if (multiplePeople) "${action}WithPeople" else action,
-                    JsonObject(fields),
-                    onSuccess = {
-                        if (item == null && editor.initialText.isNotEmpty()) model.ui.itemCapture.remove(list.id)
-                        model.showSavedItem(list.id, item?.id)
-                        dismiss()
-                    },
-                )
-            }
-            if (item != null) {
                 Box {
-                    TextButton(onClick = { actions = true }, enabled = enabled) { Text("Item actions") }
+                    IconButton(onClick = { actions = true }, enabled = enabled) {
+                        Icon(Icons.Outlined.MoreVert, "Item options")
+                    }
                     DropdownMenu(expanded = actions, onDismissRequest = { actions = false }) {
-                        DropdownMenuItem(
-                            text = { Text("Edit order") },
-                            onClick = {
-                                actions = false
-                                if (multiplePeople) {
-                                    model.ui.itemSelections.remove(list.id)
-                                    model.ui.reorderListId = list.id
-                                    model.ui.itemToReveal[list.id] = item.id
-                                    dismiss()
-                                } else if (model.ui.filters[list.id]?.active == true) {
-                                    confirm(Confirmation("Edit order", "Show all items to edit their order.", "Show all items") {
-                                        model.ui.filters.remove(list.id)
-                                        model.ui.hiddenSavedItems.remove(list.id)
-                                        model.ui.itemToReveal[list.id] = item.id
-                                        select(ItemPanel.Order)
-                                    })
-                                } else select(ItemPanel.Order)
-                            },
-                            enabled = enabled,
-                        )
-                        DropdownMenuItem(text = { Text("Duplicate item") }, onClick = {
+                        DropdownMenuItem(text = { Text("Add detail") }, onClick = {
                             actions = false
-                            duplicating = true
-                            subitems = subitems.map { it.copy(id = UUID.randomUUID().toString(), checked = false) }
+                            select(ItemPanel.AddDetail)
                         })
-                        if (organization)
-                            DropdownMenuItem(text = { Text("Duplicate for someone else") }, onClick = {
+                        if (item != null) {
+                            DropdownMenuItem(
+                                text = { Text("Edit order") },
+                                onClick = {
+                                    actions = false
+                                    if (multiplePeople) {
+                                        model.ui.itemSelections.remove(list.id)
+                                        model.ui.reorderListId = list.id
+                                        model.ui.itemToReveal[list.id] = item.id
+                                        dismiss()
+                                    } else if (model.ui.filters[list.id]?.active == true) {
+                                        confirm(Confirmation("Edit order", "Show all items to edit their order.", "Show all items") {
+                                            model.ui.filters.remove(list.id)
+                                            model.ui.hiddenSavedItems.remove(list.id)
+                                            model.ui.itemToReveal[list.id] = item.id
+                                            select(ItemPanel.Order)
+                                        })
+                                    } else select(ItemPanel.Order)
+                                },
+                                enabled = enabled,
+                            )
+                            DropdownMenuItem(text = { Text("Duplicate item") }, onClick = {
                                 actions = false
                                 duplicating = true
-                                needsPerson = true
-                                subitems = subitems.map { it.copy(id = UUID.randomUUID().toString(), checked = false) }
-                                recipients = emptyList()
-                                newPeople = emptyList()
-                                select(ItemPanel.Person)
+                                subitems = stepsToSave.map { it.copy(id = UUID.randomUUID().toString(), checked = false) }
+                                newStep = null
                             })
-                        DropdownMenuItem(
-                            text = { Text("Delete item", color = MaterialTheme.colorScheme.error) },
-                            onClick = {
-                                actions = false
-                                confirm(
-                                    Confirmation(
-                                        "Delete this item?",
-                                        "“${item.text}” will be removed${if (list.shared) " for everyone" else ""}.",
-                                        "Delete item",
-                                        true,
-                                    ) {
-                                        model.action("item.delete", list.orderedPayload("itemId" to item.id), onSuccess = dismiss)
-                                    }
-                                )
-                            },
-                            enabled = enabled,
-                        )
+                            if (organization)
+                                DropdownMenuItem(text = { Text("Duplicate for someone else") }, onClick = {
+                                    actions = false
+                                    duplicating = true
+                                    needsPerson = true
+                                    subitems = stepsToSave.map { it.copy(id = UUID.randomUUID().toString(), checked = false) }
+                                    newStep = null
+                                    recipients = emptyList()
+                                    newPeople = emptyList()
+                                    select(ItemPanel.Person)
+                                })
+                            DropdownMenuItem(
+                                text = { Text("Delete item", color = MaterialTheme.colorScheme.error) },
+                                onClick = {
+                                    actions = false
+                                    confirm(
+                                        Confirmation(
+                                            "Delete this item?",
+                                            "“${item.text}” will be removed${if (list.shared) " for everyone" else ""}.",
+                                            "Delete item",
+                                            true,
+                                        ) {
+                                            model.action("item.delete", list.orderedPayload("itemId" to item.id), onSuccess = dismiss)
+                                        }
+                                    )
+                                },
+                                enabled = enabled,
+                            )
+                        }
                     }
                 }
             }
-            TextButton(onClick = dismiss, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-                Text("Cancel")
+        }
+        if (panel == ItemPanel.Item) ItemEditorSyncStatus(state, dirty)
+        Column(
+            Modifier.weight(1f, fill = fullScreen).fillMaxWidth().verticalScroll(model.ui.editorScroll)
+                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (state.error != null) Notice(state, model)
+            when (panel) {
+                ItemPanel.AddDetail -> {
+                    if (!descriptionVisible) DetailChoice("Description", null, enabled) {
+                        showDescription()
+                        select(ItemPanel.Item)
+                    }
+                    if (organization) {
+                        val names = availability.placeIds.map(placeName) + newPlaces
+                        val placeSummary = when (availability.mode) {
+                            "anywhere" -> "Anywhere"
+                            "selected" -> names.joinToString(" or ")
+                            else -> null
+                        }
+                        DetailChoice(if (placesVisible) "Places" else "Place", placeSummary, enabled) { select(ItemPanel.Places) }
+                        val people = (recipients.map(personName) + newPeople).joinToString(", ")
+                        DetailChoice("For someone", people.ifBlank { if (personVisible) "Not set" else "Who this item is for" }, enabled) {
+                            select(ItemPanel.Person)
+                        }
+                    }
+                    if (quantityVisible) FormText(quantity, { quantity = it }, "Quantity", 100, enabled = enabled)
+                    else DetailChoice("Quantity", null, enabled) { quantityVisible = true }
+                    if (sectionVisible) {
+                        Choice(
+                            "Section", section,
+                            listOf("" to "Unsectioned") + list.sections.sortedBy { it.position }.map { it.id to it.title }, enabled,
+                        ) { section = it }
+                    } else DetailChoice("Section", null, enabled) {
+                        if (list.sections.isEmpty()) select(ItemPanel.Section) else sectionVisible = true
+                    }
+                    DoneButton { select(ItemPanel.Item) }
+                }
+                ItemPanel.Section -> {
+                    Text("Add a section from List options to use it here.")
+                    DoneButton { select(ItemPanel.Item) }
+                }
+                ItemPanel.Places -> {
+                    Text("Any one of these places works.", style = MaterialTheme.typography.bodyMedium)
+                    FormText(search, { search = it }, "Search places", 100)
+                    val query = normalizeLabel(search)
+                    val selectionFull = availability.placeIds.size + newPlaces.size >= MAX_PLACE_SELECTIONS
+                    if (query.isBlank()) {
+                        SelectionRow("Anywhere", availability.mode == "anywhere", single = true) {
+                            availability = Availability("anywhere")
+                            newPlaces = emptyList()
+                        }
+                        SelectionRow("No places set", availability.mode == "unassigned", single = true) {
+                            availability = Availability()
+                            newPlaces = emptyList()
+                        }
+                    }
+                    fun choosePlaces(ids: List<String>, names: List<String>) {
+                        availability = if (ids.isEmpty() && names.isEmpty()) Availability()
+                            else Availability("selected", ids)
+                        newPlaces = names
+                    }
+                    val sorted = list.places.sortedWith(
+                        compareByDescending<Place> { it.id in availability.placeIds }
+                            .thenByDescending { place -> list.items.count { place.id in it.availability.placeIds } }
+                            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.label }
+                    )
+                    sorted.filter { it.label.contains(query, ignoreCase = true) }.forEach { place ->
+                        val selected = place.id in availability.placeIds
+                        SelectionRow(place.label, selected, enabled = selected || !selectionFull) {
+                            val ids = if (selected) availability.placeIds - place.id else availability.placeIds + place.id
+                            choosePlaces(ids, newPlaces)
+                        }
+                    }
+                    missingPlaces.forEach { id ->
+                        DetailChoice("Remove ${placeName(id)}", "This place is no longer available.") {
+                            choosePlaces(availability.placeIds - id, newPlaces)
+                        }
+                    }
+                    newPlaces.filter { it.contains(query, ignoreCase = true) }.forEach { name ->
+                        SelectionRow(name, true) { choosePlaces(availability.placeIds, newPlaces - name) }
+                    }
+                    if (query.isNotBlank() && sorted.none { it.name.equals(query, ignoreCase = true) } &&
+                        newPlaces.none { it.equals(query, ignoreCase = true) }
+                    ) DetailChoice("Create “$query”", null, enabled = !selectionFull) {
+                        choosePlaces(availability.placeIds, newPlaces + query)
+                        search = ""
+                    }
+                    if (selectionFull) Text("You can choose up to $MAX_PLACE_SELECTIONS places.")
+                    DoneButton { select(ItemPanel.Item) }
+                }
+                ItemPanel.Person -> {
+                    Text(text.ifBlank { "Who is this item for?" }, style = MaterialTheme.typography.bodyMedium)
+                    val sorted = list.recipients.sortedWith(
+                        compareByDescending<Recipient> { it.id in recipients }
+                            .thenByDescending { person -> list.items.count { person.id in it.peopleIds } }
+                            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+                    )
+                    AssignmentOptions(
+                        search, { search = it }, "Search people", sorted.map { it.id to it.name },
+                        recipients, newPeople, single = !multiplePeople,
+                        clearLabel = "Remove person".takeUnless { multiplePeople },
+                        enabled = enabled,
+                        onChange = { ids, names ->
+                            recipients = ids
+                            newPeople = names
+                        },
+                    )
+                    missingRecipients.forEach { id ->
+                        DetailChoice("Remove ${personName(id)}", "This person is no longer available.") {
+                            recipients = recipients - id
+                        }
+                    }
+                    if (multiplePeople) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = {
+                                recipients = personPickerBaseline.first
+                                newPeople = personPickerBaseline.second
+                                select(ItemPanel.Item)
+                            }, modifier = Modifier.weight(1f)) { Text("Cancel") }
+                            Button(onClick = { select(ItemPanel.Item) }, modifier = Modifier.weight(1f)) { Text("Done") }
+                        }
+                    } else {
+                        DoneButton { select(ItemPanel.Item) }
+                    }
+                }
+                ItemPanel.Order -> if (latest != null) {
+                    val group = sortedGroup(list, latest.sectionId)
+                    val index = group.indexOfFirst { it.id == latest.id }
+                    val move = { offset: Int ->
+                        model.action(
+                            "item.move",
+                            list.orderedPayload("itemId" to latest.id, "sectionId" to latest.sectionId, "index" to index + offset),
+                        )
+                    }
+                    OutlinedButton(onClick = { move(-1) }, enabled = index > 0 && enabled) {
+                        Icon(Icons.Outlined.ArrowUpward, null, Modifier.size(18.dp))
+                        Text("Move up")
+                    }
+                    OutlinedButton(
+                        onClick = { move(1) },
+                        enabled = index in 0 until group.lastIndex && enabled,
+                    ) {
+                        Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(18.dp))
+                        Text("Move down")
+                    }
+                    DoneButton { select(ItemPanel.Item) }
+                }
+                ItemPanel.Item -> {
+                    CompactEditorField(text, { text = it.take(500) }, "Item", "editor-item-text", enabled)
+                    if (descriptionVisible && richDescriptions)
+                        DescriptionEditor(descriptionDraft, { descriptionDraft = it }, state.workspace.lists, enabled, preparingImage, { preparingImage = it })
+                    else if (descriptionVisible)
+                        FormText(note, { note = it }, "Description", 4000, false, enabled, minLines = 2)
+                    else TextButton(onClick = ::showDescription, enabled = enabled) {
+                        Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Add description")
+                    }
+                    if (hasSubchecklist) SubchecklistEditor(subitems, { subitems = it }, newStep, { newStep = it }, enabled)
+                    missingPlaces.forEach { DraftWarning("${placeName(it)} is no longer available. Choose another or remove it.") }
+                    missingRecipients.forEach { DraftWarning("${personName(it)} is no longer available. Choose another or remove it.") }
+                    if (missingSection) DraftWarning("This section is no longer available. Choose another or remove it.")
+                    if (placesConflict) {
+                        val saved = latest.availability.placeIds.joinToString(" or ", transform = placeName)
+                            .ifEmpty { if (latest.availability.mode == "anywhere") "Anywhere" else "No places set" }
+                        DraftWarning("Places changed to $saved.")
+                        DetailChoice("Use saved places") {
+                            expectedAvailability = latest.availability
+                            availability = latest.availability
+                            newPlaces = emptyList()
+                        }
+                        DetailChoice("Keep my places") { expectedAvailability = latest.availability }
+                    }
+                    if (personConflict) {
+                        val saved = latest.peopleIds.joinToString(", ", transform = personName).ifEmpty { "Not set" }
+                        DraftWarning("For someone changed to $saved.")
+                        DetailChoice(if (multiplePeople) "Use saved people" else "Use saved person") {
+                            expectedRecipients = latest.peopleIds
+                            recipients = latest.peopleIds
+                            newPeople = emptyList()
+                        }
+                        DetailChoice(if (multiplePeople) "Keep my people" else "Keep my person") { expectedRecipients = latest.peopleIds }
+                    }
+                    if (descriptionConflict) {
+                        DraftWarning("The description changed while you were editing.")
+                        DetailChoice("Use saved description") {
+                            expectedDescription = latest.description
+                            expectedNote = latest.note
+                            note = latest.note
+                            descriptionSource = latest.descriptionDraft()
+                            descriptionDraft = descriptionSource
+                            showDescription()
+                        }
+                        DetailChoice("Keep my description") {
+                            expectedDescription = latest.description
+                            expectedNote = latest.note
+                            note = latest.note
+                        }
+                    }
+                    if (subitemConflict) {
+                        DraftWarning("The subchecklist changed while you were editing.")
+                        DetailChoice("Use saved steps") {
+                            expectedSubitems = latest.subitems
+                            subitemSource = latest.subitems
+                            subitems = subitemSource
+                            newStep = null
+                        }
+                        DetailChoice("Keep my steps") { expectedSubitems = latest.subitems }
+                    }
+
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun ItemEditorSyncStatus(state: GatherState, dirty: Boolean) {
+    val pending = state.pendingChanges
+    val count = "$pending ${if (pending == 1) "change" else "changes"}"
+    val status = when {
+        dirty && pending > 0 -> "Unsaved edits · $count ${if (state.syncing) "syncing" else "waiting"}"
+        dirty && !state.connected -> "Unsaved edits · Offline"
+        dirty -> "Unsaved edits"
+        state.syncing && pending > 0 -> "Syncing $count…"
+        pending > 0 -> "Saved on device · $count waiting"
+        !state.connected && state.canEditWorkspace -> "Offline · Save on this device"
+        !state.connected -> "Offline · Connect to edit"
+        else -> "Synced"
+    }
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 22.dp).padding(start = 52.dp, end = 16.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        val icon = when {
+            dirty -> Icons.Outlined.Edit
+            state.connected -> Icons.Outlined.Sync
+            else -> Icons.Outlined.CloudOff
+        }
+        Icon(icon, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+        Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+internal fun ItemEditorLabel(text: String) {
+    Text(text, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
+}
+
+@Composable
+private fun CompactEditorField(value: String, change: (String) -> Unit, label: String, tag: String, enabled: Boolean) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        ItemEditorLabel(label)
+        BasicTextField(
+            value = value, onValueChange = change, enabled = enabled,
+            modifier = Modifier.fillMaxWidth().testTag(tag).semantics { contentDescription = label },
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            decorationBox = { inner ->
+                Box(
+                    Modifier.fillMaxWidth().heightIn(min = 40.dp)
+                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 11.dp, vertical = 7.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) { inner() }
+            },
+        )
     }
 }
 

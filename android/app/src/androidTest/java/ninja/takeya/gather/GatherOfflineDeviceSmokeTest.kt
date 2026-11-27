@@ -2,12 +2,16 @@ package ninja.takeya.gather
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.os.SystemClock
 import android.view.PixelCopy
 import android.view.Window
 import android.view.inspector.WindowInspector
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleCallback
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import java.io.File
 import java.net.URI
 import java.util.concurrent.CountDownLatch
@@ -51,19 +55,43 @@ class GatherOfflineDeviceSmokeTest {
                 val screenshotItem = args.getString("gatherSmokeScreenshotItem") ?: itemText
                 val intent = Intent(instrumentation.targetContext, MainActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                val activity = instrumentation.startActivitySync(intent)
+                var startedActivity: MainActivity? = null
+                val resumed = CountDownLatch(1)
+                val monitor = ActivityLifecycleMonitorRegistry.getInstance()
+                var hasMedia = false
+                val callback = ActivityLifecycleCallback { activity, stage ->
+                    if (activity is MainActivity && stage == Stage.RESUMED) {
+                        startedActivity = activity
+                        resumed.countDown()
+                    }
+                }
                 try {
                     instrumentation.runOnMainSync {
                         val list = checkNotNull(list())
+                        val item = list.items.single { it.text == screenshotItem }
                         model.select(list.id)
-                        model.ui.editor = Editor.ItemForm(list, list.items.single { it.text == screenshotItem })
+                        model.ui.editor = Editor.ItemForm(list, item)
+                        hasMedia = item.description.any { it.type == "image" }
+                        monitor.addLifecycleCallback(callback)
                     }
-                    val screenshot = captureWindow(activity.window)
+                    instrumentation.targetContext.startActivity(intent)
+                    check(resumed.await(90, TimeUnit.SECONDS)) { "Did not observe the editor Activity resume" }
+                    val activity = checkNotNull(startedActivity)
+                    val firstFrame = captureWindow(activity.window)
+                    val screenshot = if (hasMedia) {
+                        firstFrame.recycle()
+                        // Description media decodes in a coroutine after the first editor frame.
+                        SystemClock.sleep(8_000)
+                        captureWindow(activity.window)
+                    } else firstFrame
                     val directory = File(instrumentation.targetContext.getExternalFilesDir(null), "acceptance").apply { mkdirs() }
                     File(directory, "android-item-details.png").outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
                     screenshot.recycle()
                 } finally {
-                    instrumentation.runOnMainSync { activity.finish() }
+                    instrumentation.runOnMainSync {
+                        monitor.removeLifecycleCallback(callback)
+                        startedActivity?.finish()
+                    }
                 }
             }
             "enqueue" -> {
@@ -105,7 +133,9 @@ class GatherOfflineDeviceSmokeTest {
                     it !== window.decorView && it.isShown && it.width > 0 && it.height > 0
                 }
                 if (editor != null) {
-                    val request = PixelCopy.Request.Builder.ofWindow(editor).build()
+                    val request = PixelCopy.Request.Builder.ofWindow(editor)
+                        .setSourceRect(Rect(0, 0, editor.width, editor.height))
+                        .build()
                     PixelCopy.request(request, editor.context.mainExecutor) { result ->
                         if (result.status == PixelCopy.SUCCESS) frame = result.bitmap
                         copy.countDown()

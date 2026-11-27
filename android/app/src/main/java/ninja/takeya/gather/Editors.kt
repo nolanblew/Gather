@@ -40,12 +40,15 @@ fun EditorSheet(
     onDismiss: () -> Unit,
     onConfirm: (Confirmation) -> Unit,
 ) {
+    if (editor is Editor.ItemForm) {
+        key(editor) { ItemEditorDialog(editor, state, model, onDismiss, onConfirm) }
+        return
+    }
     key(editor, if (editor == Editor.Capture) state.captureId else null) {
         val window = LocalGatherWindow.current
         val dialog = window.width >= 600.dp || window.height < 480.dp || window.folds.isNotEmpty()
-        val itemEditor = editor is Editor.ItemForm
         val groupOrder = editor is Editor.GroupOrder
-        val maximumFormWidth = if (itemEditor) 440.dp else 560.dp
+        val maximumFormWidth = 560.dp
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         val visibility = remember { Animatable(0f) }
         LaunchedEffect(dialog) { if (dialog) visibility.animateTo(1f, GatherMotion.standard()) }
@@ -76,12 +79,12 @@ fun EditorSheet(
                         .gatherPageInput(!closing)
                         .then(if (groupOrder) Modifier else Modifier.verticalScroll(model.ui.editorScroll))
                         .padding(start = 24.dp, end = 24.dp, top = 0.dp, bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(if (itemEditor) 10.dp else 15.dp),
+                    verticalArrangement = Arrangement.spacedBy(15.dp),
                 ) {
                     if (state.error != null) Notice(state, model)
                     when (editor) {
                         is Editor.ListForm -> ListForm(editor.list, state, model, dismiss)
-                        is Editor.ItemForm -> ItemForm(editor, state, model, dismiss, onConfirm)
+                        is Editor.ItemForm -> Unit
                         is Editor.Filters -> FilterForm(editor, state, model, dismiss)
                         is Editor.BulkAdd -> BulkAddForm(editor, state, model, dismiss)
                         is Editor.GroupOrder -> GroupOrderForm(editor, state, model, dismiss)
@@ -154,6 +157,46 @@ fun EditorSheet(
                     form()
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ItemEditorDialog(
+    editor: Editor.ItemForm,
+    state: GatherState,
+    model: GatherViewModel,
+    onDismiss: () -> Unit,
+    onConfirm: (Confirmation) -> Unit,
+) {
+    val window = LocalGatherWindow.current
+    val fullScreen = window.width < 600.dp && window.folds.isEmpty()
+    Dialog(
+        onDismissRequest = { if (!state.busy) onDismiss() },
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        val focusManager = LocalFocusManager.current
+        val dismiss = {
+            focusManager.clearFocus()
+            onDismiss()
+        }
+        val form: @Composable () -> Unit = {
+            CompositionLocalProvider(LocalEditorDraft provides model.ui.editorDraft) {
+                ItemForm(editor, state, model, dismiss, onConfirm, fullScreen)
+            }
+        }
+        if (fullScreen) {
+            Surface(Modifier.fillMaxSize().testTag("editor-dialog"), color = MaterialTheme.colorScheme.background) {
+                Box(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) { form() }
+            }
+        } else GatherDialogRegion(onDismiss = { if (!state.busy) dismiss() }) { maximumHeight ->
+            Surface(
+                Modifier.widthIn(max = 560.dp).fillMaxWidth().heightIn(max = maximumHeight)
+                    .testTag("editor-dialog").pointerInput(Unit) {
+                        awaitPointerEventScope { while (true) awaitPointerEvent() }
+                    },
+                color = MaterialTheme.colorScheme.background, shape = RoundedCornerShape(18.dp),
+            ) { form() }
         }
     }
 }
