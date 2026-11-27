@@ -97,7 +97,8 @@ class GatherAcceptanceTest {
 
         compose.onNodeWithText("Add step").performScrollTo().performClick()
         compose.onNodeWithTag("field-Step").performTextInput(step)
-        compose.onNode(hasText("Add step") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        val stepDialog = isDialog() and hasAnyDescendant(hasTestTag("field-Step"))
+        compose.onNode(hasText("Add step") and hasClickAction() and hasAnyAncestor(stepDialog)).performClick()
         closeSoftKeyboard()
         saveEditor()
         awaitStored("rich description and subchecklist") {

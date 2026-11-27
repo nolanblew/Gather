@@ -23,3 +23,14 @@ Compose 1.7.2's test rule replaces the production window recomposer and its syst
 Adaptive lifecycle checks rotate the actual Activity to landscape and portrait and recreate it while credentials or an item editor contain unsaved changes. They verify retained input and selection, primary-action reachability with the keyboard, a single persisted item after saving, Android Back, and password clearing after authentication/sign-out. The original requested orientation is restored in `finally`. Run the suite in real compact, unfolded, and desktop-sized app windows as a separate matrix: rotation alone does not prove arbitrary window resizing or fold-feature delivery. Pure window-region tests verify that book and tabletop regions exclude occluding hinges; live fold posture, pointer/keyboard input, large text, and visual fit remain device/emulator checks.
 
 The injected-hinge test publishes nonzero vertical and horizontal separating features through `WindowLayoutInfoPublisherRule`, using the production `WindowInfoTracker` subscription. It checks window-relative pane bounds against the obstruction in both LTR and RTL, retains selection through fold/unfold, and verifies the same Activity remains alive. This exercises feature delivery and inset/coordinate handling without requiring a physical hinge; actual fold hardware remains separate evidence.
+
+## Staged offline smoke test
+
+Seed an unchecked item on a checklist owned by the synthetic account. Run `ninja.takeya.gather.GatherOfflineDeviceSmokeTest#runStage` with the account arguments above and `gatherSmokeList` and `gatherSmokeItem` set to the exact list and item titles. Each invocation takes one `gatherSmokeStage` value.
+
+1. With ADB reverse enabled, run `prepare` to cache the workspace.
+2. Run `adb reverse --remove tcp:48733`, then run `enqueue`. The app should check the item locally and queue one change.
+3. Run `adb shell am force-stop ninja.takeya.gather.debug`, then run `restore` while the server is still unreachable. The cached checkmark and queued change should survive the new app process.
+4. Run `adb reverse tcp:48733 tcp:48733`, then run `reconnect`. The queue should empty and the API should confirm the checked item.
+
+Run the optional `capture` stage with ADB reverse enabled to save the native editor image in the app’s external files `acceptance/android-item-details.png`. Set `gatherSmokeScreenshotItem` to capture another item in the same list.
