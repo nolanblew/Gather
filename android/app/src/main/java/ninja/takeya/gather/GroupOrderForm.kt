@@ -47,7 +47,7 @@ internal fun ColumnScope.GroupOrderForm(
         GroupOrderSnapshot(list.storedGroupOrder(editor.grouping), groups.map { it.id })
     }
     val keys = remember(snapshot.realized) { snapshot.realized.toSet() }
-    val writable = state.connected && !state.busy
+    val writable = state.canEditWorkspace && !state.busy
     val canMove = writable && groups.size > 1
     val scroll = rememberLazyListState()
     val drag = remember(scroll) { ReorderDragState<String>(scroll) }

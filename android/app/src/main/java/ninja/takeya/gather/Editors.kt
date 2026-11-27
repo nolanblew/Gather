@@ -259,11 +259,12 @@ fun SaveButton(
     state: GatherState,
     label: String = "Save changes",
     enabled: Boolean = true,
+    requiresConnection: Boolean = false,
     save: () -> Unit,
 ) {
     Button(
         onClick = save,
-        enabled = enabled && state.connected && !state.busy,
+        enabled = enabled && !state.busy && (if (requiresConnection) state.connected else state.canEditWorkspace),
         modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp).testTag("editor-save"),
         shape = RoundedCornerShape(16.dp),
     ) {
@@ -325,7 +326,7 @@ fun ListForm(list: GatherList?, state: GatherState, model: GatherViewModel, dism
     var icon by rememberEditorDraft("icon") { list?.icon ?: "list" }
     var category by rememberEditorDraft("category") { list?.categoryId ?: "" }
     LaunchedEffect(state.workspace.categories) {
-        if (category.isNotBlank() && state.workspace.categories.none { it.id == category })
+        if (category.isNotBlank() && category != list?.categoryId && state.workspace.categories.none { it.id == category })
             category = ""
     }
     var template by
@@ -417,22 +418,26 @@ fun ListForm(list: GatherList?, state: GatherState, model: GatherViewModel, dism
     }
     }
     SaveButton(state, if (list == null) "Create" else "Save", title.isNotBlank()) {
-        val values =
-            mutableListOf<Pair<String, Any?>>(
-                "title" to title.trim(),
-                "description" to description,
-                "color" to color,
-                "icon" to icon,
-                "categoryId" to category.ifBlank { null },
-            )
-        if (list?.owner != false)
-            values.addAll(
-                listOf("kind" to kind, "repeatCadence" to cadence, "isTemplate" to template)
-            )
-        if (list != null) values.add("listId" to list.id)
+        val values = buildList {
+            if (title.trim() != list?.title) add("title" to title.trim())
+            if (description != list?.description) add("description" to description)
+            if (color != list?.color) add("color" to color)
+            if (icon != list?.icon) add("icon" to icon)
+            val categoryId = category.ifBlank { null }
+            if (categoryId != list?.categoryId) add("categoryId" to categoryId)
+            if (list?.owner != false) {
+                if (kind != list?.kind) add("kind" to kind)
+                if (cadence != list?.repeatCadence) add("repeatCadence" to cadence)
+                if (template != list?.isTemplate) add("isTemplate" to template)
+            }
+        }
+        if (list != null && values.isEmpty()) {
+            dismiss()
+            return@SaveButton
+        }
         model.action(
             if (list == null) "list.create" else "list.update",
-            payload(*values.toTypedArray()),
+            payload(*(if (list == null) values else values + ("listId" to list.id)).toTypedArray()),
             list == null,
             dismiss,
         )
@@ -456,6 +461,10 @@ fun SectionForm(
     SheetHeader(if (section == null) "Add section" else "Section details", "")
     FormText(title, { title = it }, "Section name", 200, enabled = !state.busy)
     SaveButton(state, if (section == null) "Add section" else "Save changes", title.isNotBlank()) {
+        if (section != null && title.trim() == section.title) {
+            dismiss()
+            return@SaveButton
+        }
         model.action(
             if (section == null) "section.create" else "section.update",
             if (section == null) list.orderedPayload("title" to title.trim())
@@ -478,7 +487,7 @@ fun SectionForm(
                         onSuccess = dismiss,
                     )
                 },
-                enabled = index > 0 && !state.busy && state.connected,
+                enabled = index > 0 && !state.busy && state.canEditWorkspace,
                 modifier = Modifier.weight(1f),
             ) {
                 Text("Move up")
@@ -494,7 +503,7 @@ fun SectionForm(
                         onSuccess = dismiss,
                     )
                 },
-                enabled = index < sections.lastIndex && !state.busy && state.connected,
+                enabled = index < sections.lastIndex && !state.busy && state.canEditWorkspace,
                 modifier = Modifier.weight(1f),
             ) {
                 Text("Move down")
@@ -516,7 +525,7 @@ fun SectionForm(
                     }
                 )
             },
-            enabled = !state.busy && state.connected,
+            enabled = !state.busy && state.canEditWorkspace,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text("Remove section")
@@ -548,10 +557,17 @@ fun CategoryForm(
         if (category == null) "Create category" else "Save changes",
         name.isNotBlank(),
     ) {
+        val values = buildList {
+            if (name.trim() != category?.name) add("name" to name.trim())
+            if (color != category?.color) add("color" to color)
+        }
+        if (category != null && values.isEmpty()) {
+            dismiss()
+            return@SaveButton
+        }
         model.action(
             if (category == null) "category.create" else "category.update",
-            if (category == null) payload("name" to name.trim(), "color" to color)
-            else payload("categoryId" to category.id, "name" to name.trim(), "color" to color),
+            payload(*(if (category == null) values else values + ("categoryId" to category.id)).toTypedArray()),
             onSuccess = dismiss,
         )
     }
@@ -575,7 +591,7 @@ fun CategoryForm(
                     }
                 )
             },
-            enabled = !state.busy && state.connected,
+            enabled = !state.busy && state.canEditWorkspace,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text("Remove category")
@@ -604,7 +620,7 @@ fun ShareForm(
     )
     if (sharing == null) {
         if (state.busy) CircularProgressIndicator(Modifier.size(24.dp))
-        else OutlinedButton(onClick = { model.loadSharing(list.id) }) { Text("Try again") }
+        else OutlinedButton(onClick = { model.loadSharing(list.id) }, enabled = state.connected) { Text("Try again") }
     } else {
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
@@ -641,6 +657,7 @@ fun ShareForm(
                                     "They’ll lose access immediately. Their edits stay.",
                                     "Remove person",
                                     true,
+                                    requiresConnection = true,
                                 ) {
                                     model.sharingAction("remove", list.id, member.userId)
                                 }
@@ -714,6 +731,7 @@ fun ShareForm(
             SaveButton(
                 state,
                 if (sharing.inviteActive) "Make a new link" else "Create invitation",
+                requiresConnection = true,
             ) {
                 if (sharing.inviteActive)
                     confirm(
@@ -721,6 +739,7 @@ fun ShareForm(
                             "Replace the pending invitation?",
                             "The previous link will stop working. People who already joined keep access.",
                             "Make new link",
+                            requiresConnection = true,
                         ) {
                             model.sharingAction("invite", list.id)
                         }
@@ -735,6 +754,7 @@ fun ShareForm(
                                 "Revoke this invitation?",
                                 "The pending link will stop working. Accepted members keep access.",
                                 "Revoke link",
+                                requiresConnection = true,
                             ) {
                                 model.sharingAction("revoke", list.id)
                             }
@@ -758,6 +778,7 @@ fun ShareForm(
                             "Your edits stay. You’ll need a new invitation to return.",
                             "Leave list",
                             true,
+                            requiresConnection = true,
                         ) {
                             model.sharingAction("leave", list.id)
                             dismiss()
@@ -822,6 +843,7 @@ fun PasswordForm(state: GatherState, model: GatherViewModel, dismiss: () -> Unit
         state,
         "Change password",
         current.isNotBlank() && replacement.length >= 6 && repeat == replacement,
+        requiresConnection = true,
     ) {
         submitted = true
         model.changePassword(current, replacement)

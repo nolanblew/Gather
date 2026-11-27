@@ -74,6 +74,51 @@ class GatherAcceptanceTest {
         }
     }
 
+    @Test fun richDescriptionAndSubchecklistPersistIndependentlyOfItemCompletion() {
+        val fixture = LocalAcceptanceFixture()
+        val title = "Item details ${fixture.runId}"
+        val item = "Pack the basket"
+        val description = "Lunch for four"
+        val step = "Pack the napkins"
+        val listId = fixture.action("list.create", json("title" to title)).getString("createdListId")
+        fixture.action("item.create", json("listId" to listId, "text" to item))
+        signIn(fixture)
+
+        scrollText(title)
+        click(title)
+        scrollText(item)
+        click(item)
+        compose.onNodeWithText("Add description").performScrollTo().performClick()
+        val body = compose.onNodeWithTag("field-Description")
+        body.performScrollTo().performClick()
+        compose.onNodeWithContentDescription("Bold").performScrollTo().performClick()
+        body.performTextInput(description)
+        closeSoftKeyboard()
+
+        compose.onNodeWithText("Add step").performScrollTo().performClick()
+        compose.onNodeWithTag("field-Step").performTextInput(step)
+        compose.onNode(hasText("Add step") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        closeSoftKeyboard()
+        saveEditor()
+        awaitStored("rich description and subchecklist") {
+            val stored = fixture.item(title, item)
+            val run = stored?.optJSONArray("description")?.optJSONObject(0)?.optJSONArray("runs")?.optJSONObject(0)
+            val storedStep = stored?.optJSONArray("subitems")?.optJSONObject(0)
+            run?.optString("text") == description && run.optBoolean("bold") &&
+                storedStep?.optString("text") == step && !storedStep.optBoolean("checked")
+        }
+
+        scrollDescription("Show details for $item")
+        clickDescription("Show details for $item")
+        scrollDescription("Check step $step")
+        clickDescription("Check step $step")
+        awaitStored("independent subchecklist completion") {
+            val stored = fixture.item(title, item)
+            stored?.optJSONArray("subitems")?.optJSONObject(0)?.optBoolean("checked") == true &&
+                !stored.optBoolean("checked")
+        }
+    }
+
     @Test fun realAppListsSharingSearchTemplatesArchiveAndAppearance() {
         val fixture = LocalAcceptanceFixture()
         signIn(fixture)
@@ -356,7 +401,7 @@ class GatherAcceptanceTest {
             compose.activityRule.scenario.recreate()
             compose.waitUntil(20_000) { file.exists() && retained.state.value.message == "Backup saved." }
             val backup = JSONObject(file.readText())
-            assertEquals(2, backup.getInt("version"))
+            assertEquals(created.getInt("version"), backup.getInt("version"))
             val lists = backup.getJSONArray("lists")
             val saved = (0 until lists.length()).map { lists.getJSONObject(it) }.single { it.getString("id") == listId }
             assertEquals(title, saved.getString("title"))
@@ -1087,7 +1132,8 @@ class GatherAcceptanceTest {
 
     private fun viewModel(key: String? = null): GatherViewModel = compose.runOnIdle {
         val provider = ViewModelProvider(compose.activity)
-        if (key == null) provider[GatherViewModel::class.java] else provider.get(key, GatherViewModel::class.java)
+        if (key == null) (compose.activity.application as GatherApplication).gatherModel
+        else provider.get(key, GatherViewModel::class.java)
     }
 
     private fun signIn(fixture: LocalAcceptanceFixture) {

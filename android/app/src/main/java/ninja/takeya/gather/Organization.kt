@@ -84,7 +84,7 @@ val GatherList.usesRecipients: Boolean
     get() = items.any { it.peopleIds.isNotEmpty() }
 
 val GatherList.hasItemDetails: Boolean
-    get() = usesPlaces || usesRecipients || items.any { it.note.isNotBlank() || it.quantity.isNotBlank() }
+    get() = usesPlaces || usesRecipients || items.any { it.note.isNotBlank() || it.description.isNotEmpty() || it.quantity.isNotBlank() }
 
 fun GatherList.canonicalItems(): List<ListItem> =
     sortedGroup(this, null) + sections.sortedBy { it.position }.flatMap { sortedGroup(this, it.id) }

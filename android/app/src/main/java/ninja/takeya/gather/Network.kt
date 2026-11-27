@@ -15,13 +15,26 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 import okhttp3.*
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 
-class TokenVault(context: Context) {
+@Serializable
+internal data class StoredNativeSession(
+    val token: String,
+    val userId: String? = null,
+    val username: String? = null,
+    val expiresAt: String? = null,
+) {
+    fun expired(): Boolean = expiresAt?.let { value ->
+        runCatching { !java.time.Instant.parse(value).isAfter(java.time.Instant.now()) }.getOrDefault(false)
+    } == true
+}
+
+internal class TokenVault(context: Context) {
     private val prefs = context.getSharedPreferences("gather_credentials", Context.MODE_PRIVATE)
 
     private fun key(): SecretKey {
@@ -44,7 +57,7 @@ class TokenVault(context: Context) {
             .generateKey()
     }
 
-    fun read(): String? {
+    fun read(): StoredNativeSession? {
         val encoded = prefs.getString("session", null) ?: return null
         return try {
             val parts = encoded.split(':')
@@ -54,21 +67,24 @@ class TokenVault(context: Context) {
                 key(),
                 GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP)),
             )
-            String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), Charsets.UTF_8)
+            val decoded = String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), Charsets.UTF_8)
+            // Existing installs store a token alone. A verified session adds the account identity.
+            if (decoded.startsWith("{")) Json.decodeFromString<StoredNativeSession>(decoded)
+            else StoredNativeSession(decoded)
         } catch (_: Exception) {
             clear()
             null
         }
     }
 
-    fun write(token: String) {
+    fun write(session: StoredNativeSession) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val value =
             Base64.encodeToString(cipher.iv, Base64.NO_WRAP) +
                 ":" +
                 Base64.encodeToString(
-                    cipher.doFinal(token.toByteArray(Charsets.UTF_8)),
+                    cipher.doFinal(Json.encodeToString(session).toByteArray(Charsets.UTF_8)),
                     Base64.NO_WRAP,
                 )
         check(prefs.edit().putString("session", value).commit()) {
@@ -99,7 +115,7 @@ class GatherApi {
             .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(false)
             .build()
-    // GETs may safely recover a stale pooled socket; writes are never replayed.
+    // GETs recover stale pooled sockets. The durable outbox controls retries for actions.
     private val readClient = client.newBuilder().retryOnConnectionFailure(true).build()
 
     init {
@@ -128,8 +144,18 @@ class GatherApi {
         return exchange(request, COVER_RESPONSE_LIMIT)
     }
 
-    suspend fun uploadListCover(listId: String, bytes: ByteArray, token: String): String {
+    suspend fun uploadListCover(
+        listId: String,
+        bytes: ByteArray,
+        token: String,
+        operationId: String? = null,
+        expectedCoverId: String? = null,
+    ): String {
         val request = requestBuilder(coverUrl(listId).build().toString(), token)
+            .apply {
+                if (operationId != null) header("Idempotency-Key", operationId)
+                if (expectedCoverId != null) header("If-Match", expectedCoverId)
+            }
             .put(bytes.toRequestBody("image/webp".toMediaType())).build()
         return exchange(request, WORKSPACE_RESPONSE_LIMIT).toString(Charsets.UTF_8)
     }

@@ -4,6 +4,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.LruCache
+import android.util.Base64
 import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -36,7 +37,13 @@ data class GatherState(
     val exportReady: Boolean = false,
     val appearance: String = "system",
     val capabilities: Set<String> = emptySet(),
+    val workspaceReady: Boolean = false,
+    val pendingChanges: Int = 0,
+    val syncing: Boolean = false,
 ) {
+    val canEditWorkspace
+        get() = workspaceReady && (connected || "offline-actions" in capabilities)
+
     val selected
         get() = workspace.lists.firstOrNull { it.id == selectedId }
 }
@@ -52,6 +59,7 @@ internal fun GatherState.adoptWorkspace(
     return copy(
         workspace = result,
         connected = true,
+        workspaceReady = true,
         selectedId = selection,
         categoryId = categoryId?.takeIf { id -> result.categories.any { it.id == id } },
         sharing = sharing.takeIf { selection != null && selection == selectedId },
@@ -63,6 +71,7 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     val ui = GatherUiState()
     private val api = GatherApi()
     private val vault = TokenVault(application)
+    private val offlineStore = OfflineWorkspaceStore(application)
     private val preferences = application.getSharedPreferences("appearance", 0)
     private val itemViewPreferences = application.getSharedPreferences("item-view", 0)
     private val covers = object : LruCache<Pair<String, String>, Bitmap>(16 * 1024) {
@@ -74,7 +83,13 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         )
     val state: StateFlow<GatherState> = mutable.asStateFlow()
     private val serial = Mutex()
-    private var token: String? = vault.read()
+    private val localWrites = Mutex()
+    private var storedSession: StoredNativeSession? = vault.read()
+    private val token get() = storedSession?.token
+    private var accountId: String? = null
+    private var offline = OfflineWorkspace()
+    private var sessionConfirmed = false
+    private var serverFeatures: Set<String>? = null
     private val epochs = SessionEpoch()
     private val epoch
         get() = epochs.current
@@ -82,8 +97,8 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     private var searchJob: Job? = null
     private var authJob: Job? = null
     private var refreshJob: Job? = null
-    private var capabilitiesJob: Job? = null
-    private var capabilitiesEpoch: Long? = null
+    private var expiryJob: Job? = null
+
 
     // Kept out of both Compose state and saved instance bundles (backups can be 5 MiB).
     private data class PendingExport(val document: String, val epoch: Long, val username: String?)
@@ -91,10 +106,22 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     private var pendingExport: PendingExport? = null
 
     init {
-        authJob =
-            viewModelScope.launch {
-                if (token == null) mutable.update { it.copy(starting = false) } else verifySession()
+        authJob = viewModelScope.launch {
+            val session = storedSession
+            if (session?.expired() == true) clearAccount("Your session ended. Sign in to continue.")
+            else if (session != null) {
+                scheduleSessionExpiry(session)
+                val expected = epoch
+                try {
+                    restoreAccount(session, expected)
+                    if (offline.outbox.isNotEmpty()) OfflineSyncJob.schedule(getApplication())
+                } catch (failure: Exception) {
+                    fail(failure, expected)
+                }
+                if (valid(expected)) requestSync()
             }
+            if (storedSession?.userId != null || storedSession == null) mutable.update { it.copy(starting = false) }
+        }
     }
 
     private fun valid(expected: Long) = epochs.isCurrent(expected)
@@ -127,48 +154,121 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private suspend fun workspace(expected: Long) {
+    private suspend fun restoreAccount(session: StoredNativeSession, expected: Long) {
+        val id = session.userId ?: return
+        val name = checkNotNull(session.username)
+        if (accountId != id) {
+            val snapshot = withContext(Dispatchers.IO) { offlineStore.read(id) }
+            if (!valid(expected)) return
+            accountId = id
+            offline = snapshot
+        }
+        if (!valid(expected)) return
+        mutable.update { it.copy(username = name, capabilities = offline.capabilities) }
+        val record = offline
+        record.projectForDisplay(name)?.let { projected ->
+            publishOffline(expected, record, projected, notice = record.syncNotice)
+        }
+    }
+
+    private suspend fun confirmSession(expected: Long) {
+        val old = storedSession ?: return
+        val session = api.decode<Session>(api.request("/api/native/auth/session", old.token))
+        if (!valid(expected)) return
+        if (!session.authenticated) {
+            clearAccount("Your session ended. Sign in to continue.")
+            return
+        }
+        val verified = StoredNativeSession(
+            old.token, checkNotNull(session.userId), checkNotNull(session.username), session.expiresAt ?: old.expiresAt,
+        )
+        if (old.userId != null && old.userId != verified.userId) {
+            clearAccount("Your session ended. Sign in to continue.")
+            return
+        }
+        if (old != verified) vault.write(verified)
+        storedSession = verified
+        restoreAccount(verified, expected)
+        if (valid(expected)) {
+            sessionConfirmed = true
+            scheduleSessionExpiry(verified)
+        }
+    }
+
+    private suspend fun OfflineWorkspace.projectForDisplay(username: String): Workspace? =
+        if (outbox.isEmpty()) base else withContext(Dispatchers.Default) { projected(username) }
+
+    private fun publishOffline(
+        expected: Long,
+        record: OfflineWorkspace,
+        workspace: Workspace,
+        connected: Boolean? = null,
+        receipt: Workspace? = null,
+        selectCreated: Boolean = false,
+        notice: String? = null,
+    ) {
+        if (!valid(expected) || offline !== record) return
+        val projected = workspace.withoutReceipt().copy(
+            createdListId = receipt?.createdListId,
+            createdItemId = receipt?.createdItemId,
+            joinedListId = receipt?.joinedListId,
+            createdSubitemId = receipt?.createdSubitemId,
+        )
+        mutable.update { current ->
+            current.adoptWorkspace(projected, selectCreated).copy(
+                connected = connected ?: current.connected,
+                capabilities = record.capabilities,
+                pendingChanges = record.outbox.size,
+                message = notice ?: current.message,
+            )
+        }
+    }
+
+    private suspend fun persistOffline(
+        expected: Long,
+        connected: Boolean? = null,
+        receipt: Workspace? = null,
+        selectCreated: Boolean = false,
+        publish: Boolean = true,
+        transform: (OfflineWorkspace) -> OfflineWorkspace,
+    ): Boolean = localWrites.withLock {
+        val id = accountId ?: return@withLock false
+        if (!valid(expected)) return@withLock false
+        val previous = offline
+        val next = transform(previous)
+        val projection = if (publish) next.projectForDisplay(state.value.username.orEmpty()) else null
+        if (!valid(expected)) return@withLock false
+        if (previous != next) {
+            withContext(NonCancellable) {
+                withContext(Dispatchers.IO) { offlineStore.write(id, next) }
+                if (valid(expected)) offline = next
+            }
+        }
+        if (!valid(expected)) return@withLock false
+        if (projection != null) {
+            val notice = next.syncNotice.takeIf { it != previous.syncNotice }
+            publishOffline(expected, offline, projection, connected, receipt, selectCreated, notice)
+        }
+        true
+    }
+
+    private suspend fun workspace(expected: Long): Workspace {
         val result = api.decode<Workspace>(api.request("/api/workspace", token))
         if (valid(expected)) {
-            mutable.update { current -> current.adoptWorkspace(result) }
-            refreshCapabilities(expected)
-        }
-    }
-
-    private fun refreshCapabilities(expected: Long) {
-        if (capabilitiesEpoch == expected || capabilitiesJob?.isActive == true) return
-        capabilitiesJob = viewModelScope.launch {
-            try {
-                val features = api.decode<ApiCapabilities>(api.request("/api/capabilities")).features.toSet()
-                if (valid(expected)) {
-                    capabilitiesEpoch = expected
-                    mutable.update { it.copy(capabilities = features) }
+            if (serverFeatures == null || !state.value.connected) {
+                serverFeatures = try {
+                    api.decode<ApiCapabilities>(api.request("/api/capabilities")).features.toSet()
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (failure: Exception) {
+                    if (failure is ApiFailure && failure.status == 404) emptySet() else null
                 }
-            } catch (failure: CancellationException) {
-                throw failure
-            } catch (_: Exception) {
-                // The optional capabilities endpoint must not block workspace use.
+            }
+            persistOffline(expected, connected = true) {
+                it.copy(base = result.withoutReceipt(), capabilities = serverFeatures ?: it.capabilities)
             }
         }
-    }
-
-    private suspend fun verifySession() {
-        val expected = epoch
-        try {
-            val session = api.decode<Session>(api.request("/api/native/auth/session", token))
-            if (!valid(expected)) return
-            if (!session.authenticated) {
-                clearAccount()
-                return
-            }
-            mutable.update { it.copy(username = session.username) }
-            serial.withLock { if (valid(expected)) workspace(expected) }
-            if (state.value.inviteToken != null) previewInvite()
-        } catch (e: Exception) {
-            fail(e, expected)
-        } finally {
-            if (valid(expected)) mutable.update { it.copy(starting = false) }
-        }
+        return result
     }
 
     fun authenticate(username: String, password: String, register: Boolean) {
@@ -177,9 +277,13 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         val expected = epoch
         authJob?.cancel()
         refreshJob?.cancel()
-        capabilitiesJob?.cancel()
+        expiryJob?.cancel()
         covers.evictAll()
-        token = null
+        storedSession = null
+        sessionConfirmed = false
+        serverFeatures = null
+        accountId = null
+        offline = OfflineWorkspace()
         vault.clear()
         mutable.update {
             it.copy(
@@ -187,43 +291,54 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
                 error = null,
                 message = null,
                 workspace = Workspace(),
+                workspaceReady = false,
+                pendingChanges = 0,
+                syncing = false,
                 username = null,
                 connected = false,
                 capabilities = emptySet(),
             )
         }
-        authJob =
-            viewModelScope.launch {
-                try {
-                    val endpoint = if (register) "register" else "login"
-                    val credentials = payload("username" to username.trim(), "password" to password)
-                    val response = api.request("/api/native/auth/$endpoint", body = credentials)
-                    val session = api.decode<Session>(response)
-                    if (!valid(expected)) return@launch
-                    val fresh = session.accessToken ?: error("Missing secure session")
-                    vault.write(fresh)
-                    token = fresh
-                    mutable.update { it.copy(username = session.username) }
-                    serial.withLock { if (valid(expected)) workspace(expected) }
-                    if (state.value.inviteToken != null) previewInvite()
-                } catch (e: Exception) {
-                    if (e is ApiFailure && e.status == 401 && valid(expected))
-                        mutable.update { it.copy(error = e.message) }
-                    else fail(e, expected)
-                } finally {
-                    if (valid(expected)) mutable.update { it.copy(busy = false, starting = false) }
-                }
+        authJob = viewModelScope.launch {
+            try {
+                val endpoint = if (register) "register" else "login"
+                val credentials = payload("username" to username.trim(), "password" to password)
+                val session = api.decode<Session>(api.request("/api/native/auth/$endpoint", body = credentials))
+                if (!valid(expected)) return@launch
+                val fresh = StoredNativeSession(
+                    checkNotNull(session.accessToken), checkNotNull(session.userId),
+                    checkNotNull(session.username), session.expiresAt,
+                )
+                vault.write(fresh)
+                storedSession = fresh
+                restoreAccount(fresh, expected)
+                if (!valid(expected)) return@launch
+                sessionConfirmed = true
+                scheduleSessionExpiry(fresh)
+                if (offline.outbox.isNotEmpty()) OfflineSyncJob.schedule(getApplication())
+                requestSync()
+            } catch (failure: Exception) {
+                if (failure is ApiFailure && failure.status == 401 && valid(expected))
+                    mutable.update { it.copy(error = failure.message) }
+                else fail(failure, expected)
+            } finally {
+                if (valid(expected)) mutable.update { it.copy(busy = false, starting = false) }
             }
+        }
     }
 
     private fun clearAccount(error: String? = null, message: String? = null) {
         ui.clearAccount()
         pendingExport = null
         refreshJob?.cancel()
-        capabilitiesJob?.cancel()
+        expiryJob?.cancel()
         covers.evictAll()
         epochs.advance()
-        token = null
+        storedSession = null
+        sessionConfirmed = false
+        serverFeatures = null
+        accountId = null
+        offline = OfflineWorkspace()
         vault.clear()
         searchJob?.cancel()
         mutable.update {
@@ -238,9 +353,27 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun scheduleSessionExpiry(session: StoredNativeSession) {
+        expiryJob?.cancel()
+        val until = session.expiresAt?.let { value ->
+            runCatching { java.time.Instant.parse(value).toEpochMilli() - System.currentTimeMillis() }.getOrNull()
+        } ?: return
+        expiryJob = viewModelScope.launch {
+            delay(until.coerceAtLeast(1))
+            if (token == session.token) hasCurrentSession()
+        }
+    }
+
+    private fun hasCurrentSession(): Boolean {
+        val session = storedSession ?: return false
+        if (!session.expired()) return true
+        clearAccount("Your session ended. Sign in to continue.")
+        return false
+    }
+
     fun logout() {
         if (state.value.busy) return
-        val oldToken = token
+        val oldToken = token ?: return
         val expected = epoch
         mutable.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
@@ -249,8 +382,8 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
                 try {
                     api.request("/api/native/auth/logout", oldToken, payload())
                     if (valid(expected)) clearAccount(message = "Signed out on this phone.")
-                } catch (e: Exception) {
-                    fail(e, expected)
+                } catch (failure: Exception) {
+                    fail(failure, expected)
                 } finally {
                     if (valid(expected)) mutable.update { it.copy(busy = false) }
                 }
@@ -260,26 +393,137 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
 
     fun refresh() {
         if (token == null || state.value.busy || state.value.starting) return
-        if (refreshJob?.isActive == true) return
-        if (state.value.username == null) {
-            mutable.update { it.copy(starting = true, error = null) }
-            authJob = viewModelScope.launch { verifySession() }
-            return
-        }
+        requestSync()
+    }
+
+    internal suspend fun syncInBackground(): Boolean {
+        authJob?.join()
+        if (token == null || offline.outbox.isEmpty()) return false
+        requestSync()?.join()
+        return token != null && offline.outbox.isNotEmpty()
+    }
+
+    private fun requestSync(): Job? {
+        if (!hasCurrentSession()) return null
+        refreshJob?.takeIf { it.isActive }?.let { return it }
         val expected = epoch
-        refreshJob =
-            viewModelScope.launch {
-                serial.withLock {
-                    if (!valid(expected)) return@withLock
-                    try {
-                        workspace(expected)
-                        if (valid(expected)) mutable.update { it.copy(error = null) }
-                    } catch (e: Exception) {
-                        fail(e, expected)
-                    }
+        return viewModelScope.launch {
+            var refreshSearch = false
+            serial.withLock {
+                if (!valid(expected)) return@withLock
+                try {
+                    if (!sessionConfirmed) confirmSession(expected)
+                    if (!valid(expected) || accountId == null) return@withLock
+                    if (offline.outbox.isNotEmpty()) mutable.update { it.copy(syncing = true) }
+                    workspace(expected)
+                    if ("offline-actions" in serverFeatures.orEmpty()) drainOutbox(expected)
+                    refreshSearch = valid(expected) && state.value.query.isNotBlank()
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (failure: Exception) {
+                    if (valid(expected) && state.value.workspaceReady && retryable(failure))
+                        mutable.update { it.copy(connected = false) }
+                    else fail(failure, expected)
+                } finally {
+                    if (valid(expected)) mutable.update { it.copy(syncing = false, starting = false) }
                 }
-                if (valid(expected) && state.value.query.isNotBlank()) scheduleSearch()
             }
+            if (refreshSearch) scheduleSearch()
+            if (valid(expected) && state.value.connected && state.value.inviteToken != null && state.value.invite == null) previewInvite()
+        }.also { refreshJob = it }
+    }
+
+    private fun retryable(failure: Exception): Boolean = failure !is ApiFailure ||
+        failure.status in listOf(408, 425, 429) || failure.status >= 500
+
+    private suspend fun drainOutbox(expected: Long) {
+        val accessToken = token ?: return
+        var rebases = 0
+        while (valid(expected)) {
+            val first = offline.outbox.firstOrNull() ?: break
+            if (first.type == "workspace.import" && "offline-import" !in serverFeatures.orEmpty()) break
+            val known = offline.base ?: break
+            val action = first.submitted?.let { ActionPlan.Write(it) } ?: first.rebase(known)
+            if (action is ActionPlan.Done) {
+                finishAction(expected, first, resolvedIds = action.resolvedIds, notice = action.notice)
+                continue
+            }
+            val submitted = (action as ActionPlan.Write).data
+            if (first.submitted == null && !persistOffline(expected, publish = false) { record ->
+                    record.copy(outbox = listOf(first.copy(submitted = submitted)) + record.outbox.drop(1))
+                }) break
+            try {
+                val result = sendAction(first, submitted, accessToken)
+                if (!valid(expected)) return
+                finishAction(expected, first, result, result.resolvedIds)
+                rebases = 0
+            } catch (failure: ApiFailure) {
+                if (failure.status == 401 || retryable(failure)) throw failure
+                // Retry only after a definite rejection. A transport failure keeps the exact sent
+                // body so the server can identify an operation whose acknowledgment was lost.
+                val fresh = workspace(expected)
+                if (!valid(expected)) return
+                val revised = first.rebase(fresh)
+                if (failure.code != "OPERATION_ID_REUSED" && revised is ActionPlan.Write && revised.data != submitted) {
+                    persistOffline(expected, publish = false) { record ->
+                        record.copy(outbox = listOf(first.copy(submitted = null)) + record.outbox.drop(1))
+                    }
+                    if (++rebases >= 4) return
+                } else if (revised is ActionPlan.Done) {
+                    finishAction(expected, first, resolvedIds = revised.resolvedIds, notice = revised.notice)
+                } else {
+                    finishAction(expected, first, notice = failure.message ?: "A change couldn’t sync.")
+                }
+            }
+        }
+    }
+
+    private suspend fun sendAction(action: OfflineAction, data: JsonObject, accessToken: String): Workspace {
+        val raw = if (action.type == "cover.put") api.uploadListCover(
+            checkNotNull(data.string("listId")), data.coverBytes(), accessToken, action.id,
+            data.string("expectedCoverId") ?: "none",
+        ) else api.request(
+            "/api/actions", accessToken, payload("type" to action.type, "operationId" to action.id, "payload" to data),
+        )
+        return api.decode(raw)
+    }
+
+    private fun JsonObject.coverBytes(): ByteArray = Base64.decode(checkNotNull(string("data")), Base64.NO_WRAP)
+
+    private suspend fun finishAction(
+        expected: Long,
+        action: OfflineAction,
+        result: Workspace? = null,
+        resolvedIds: Map<String, String> = emptyMap(),
+        notice: String? = null,
+    ) {
+        val coverDigest = action.data.string("digest").takeIf { action.type == "cover.put" }
+        val coverId = result?.resolvedCoverId
+        val aliases = if (coverDigest != null && coverId != null) resolvedIds + (coverDigest to coverId) else resolvedIds
+        val imageAliases = if (result?.resolvedImages?.isNotEmpty() == true) {
+            withContext(Dispatchers.Default) { result.imageAliasesFor(action) }
+        } else emptyMap()
+        persistOffline(expected, connected = true) { record ->
+            check(record.outbox.firstOrNull()?.id == action.id)
+            record.copy(
+                base = result?.withoutReceipt() ?: record.base,
+                outbox = record.outbox.drop(1).map { it.remap(aliases, imageAliases) },
+                syncNotice = notice ?: record.syncNotice,
+            )
+        }
+    }
+
+    private fun Workspace.imageAliasesFor(action: OfflineAction): Map<String, String> {
+        val descriptions = if (action.type == "workspace.import") {
+            val ids = (action.data["contentIds"] as? JsonObject)?.values.orEmpty()
+                .mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.toSet()
+            lists.filter { it.id in ids }.flatMap { list -> list.items.flatMap { it.description } }
+        } else {
+            lists.firstOrNull { it.id == action.data.string("listId") }
+                ?.items?.firstOrNull { it.id == action.data.string("itemId") }?.description.orEmpty()
+        }
+        val urls = descriptions.mapNotNull { it.dataUrl }.associateBy(::workspaceHash)
+        return resolvedImages.mapNotNull { (source, digest) -> urls[digest]?.let { source to it } }.toMap()
     }
 
     fun canRetrySession(): Boolean =
@@ -338,7 +582,12 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         val expected = epoch
-        mutable.update { it.copy(searching = true) }
+        val local = localWorkspaceSearch(snapshot.workspace, snapshot.scope, snapshot.categoryId, snapshot.query)
+        if (!snapshot.connected || snapshot.pendingChanges > 0) {
+            mutable.update { it.copy(search = local, searching = false) }
+            return
+        }
+        mutable.update { it.copy(search = local, searching = true) }
         searchJob =
             viewModelScope.launch {
                 delay(350)
@@ -365,8 +614,8 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
                         mutable.update { it.copy(search = response, searching = false) }
                 } catch (e: Exception) {
                     if (e !is CancellationException && valid(expected)) {
-                        fail(e, expected)
-                        mutable.update { it.copy(searching = false) }
+                        if (e is ApiFailure && e.status == 401) fail(e, expected)
+                        else mutable.update { it.copy(searching = false, connected = !retryable(e) && it.connected) }
                     }
                 }
             }
@@ -377,13 +626,56 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         data: JsonObject,
         selectCreated: Boolean = false,
         onSuccess: (() -> Unit)? = null,
-    ) =
-        mutation(
-            "/api/actions",
-            payload("type" to type).let { JsonObject(it + ("payload" to data)) },
-            selectCreated,
-            onSuccess,
-        )
+    ) {
+        val snapshot = state.value
+        if (snapshot.busy || !snapshot.canEditWorkspace || !hasCurrentSession()) return
+        if ("offline-actions" !in snapshot.capabilities) {
+            mutation("/api/actions", payload("type" to type, "payload" to data), selectCreated, onSuccess)
+            return
+        }
+        val expected = epoch
+        val pending = makeOfflineAction(type, data, snapshot.workspace)
+        mutable.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                enqueueAction(expected, pending, selectCreated, onSuccess)
+            } finally {
+                if (valid(expected)) mutable.update { it.copy(busy = false) }
+            }
+        }
+    }
+
+    private suspend fun enqueueAction(
+        expected: Long,
+        action: OfflineAction,
+        selectCreated: Boolean = false,
+        after: (() -> Unit)? = null,
+    ) {
+        if (!valid(expected) || !hasCurrentSession()) return
+        try {
+            val receipt = Workspace(
+                createdListId = when (action.type) {
+                    "list.create" -> action.data.string("listId")
+                    "list.clone" -> action.data.string("createdListId")
+                    else -> null
+                },
+                createdItemId = action.data.string("itemId").takeIf { action.type in setOf("item.create", "item.createWithPeople") },
+                createdSubitemId = action.data.string("subitemId").takeIf { action.type == "subitem.create" },
+            )
+            if (persistOffline(expected, receipt = receipt, selectCreated = selectCreated) {
+                    it.copy(outbox = it.outbox + action)
+                }) {
+                OfflineSyncJob.schedule(getApplication())
+                after?.invoke()
+                if (state.value.query.isNotBlank()) scheduleSearch()
+                requestSync()
+            }
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Exception) {
+            if (valid(expected)) mutable.update { it.copy(error = "Couldn’t save this change on your device. Try again.") }
+        }
+    }
 
     private fun mutation(
         path: String,
@@ -408,8 +700,9 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
                     if (!valid(expected)) return@withLock
                     val result = request()
                     if (valid(expected)) {
-                        mutable.update { current -> current.adoptWorkspace(result, selectCreated) }
-                        after?.invoke()
+                        if (persistOffline(expected, connected = true, receipt = result, selectCreated = selectCreated) {
+                                it.copy(base = result.withoutReceipt())
+                            }) after?.invoke()
                     }
                 } catch (e: Exception) {
                     fail(e, expected, true)
@@ -431,6 +724,7 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     internal suspend fun loadListCover(listId: String, coverId: String): Bitmap? {
+        if (!hasCurrentSession()) return null
         val expected = epoch
         val accessToken = token ?: return null
         fun canUseCover() = valid(expected) && state.value.workspace.lists.any { it.id == listId && it.coverId == coverId }
@@ -438,8 +732,18 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         val key = listId to coverId
         covers.get(key)?.let { return it }
         return try {
-            val bytes = api.listCover(listId, coverId, accessToken)
+            val id = accountId ?: return null
+            val queued = offline.outbox.lastOrNull {
+                it.type == "cover.put" && it.data.string("digest") == coverId
+            }?.data?.coverBytes()
+            val cached = withContext(Dispatchers.IO) { offlineStore.readCover(id, listId, coverId) }
+            val bytes = queued ?: cached ?: api.listCover(listId, coverId, accessToken)
             val bitmap = decodeListCover(bytes, coverId) ?: return null
+            if (queued == null && cached == null && canUseCover()) {
+                withContext(Dispatchers.IO) {
+                    runCatching { offlineStore.writeCover(id, listId, coverId, bytes) }
+                }
+            }
             if (!canUseCover()) return null
             covers.put(key, bitmap)
             bitmap
@@ -451,13 +755,38 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun uploadListCover(listId: String, image: Uri) {
+        val snapshot = state.value
+        val list = snapshot.workspace.lists.find { it.id == listId } ?: return
         val accessToken = token ?: return
-        if ("list-covers" !in state.value.capabilities || state.value.workspace.lists.none { it.id == listId }) return
+        if (snapshot.busy || !snapshot.canEditWorkspace || "list-covers" !in snapshot.capabilities || !hasCurrentSession()) return
         val expected = epoch
-        mutateWorkspace(after = { report("List cover updated.") }) {
-            val bytes = prepareListCover(getApplication<Application>().contentResolver, image)
-            if (!valid(expected)) throw CancellationException()
-            api.decode<Workspace>(api.uploadListCover(listId, bytes, accessToken))
+        val resolver = getApplication<Application>().contentResolver
+        if ("offline-actions" !in snapshot.capabilities) {
+            mutateWorkspace(after = { report("List cover updated.") }) {
+                val bytes = prepareListCover(resolver, image)
+                if (!valid(expected)) throw CancellationException()
+                api.decode<Workspace>(api.uploadListCover(listId, bytes, accessToken))
+            }
+            return
+        }
+        mutable.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val bytes = prepareListCover(resolver, image)
+                if (!valid(expected)) return@launch
+                val digest = workspaceHash(bytes)
+                val data = payload(
+                    "listId" to listId, "data" to Base64.encodeToString(bytes, Base64.NO_WRAP),
+                    "digest" to digest, "expectedCoverId" to list.coverId,
+                )
+                enqueueAction(expected, makeOfflineAction("cover.put", data, snapshot.workspace), after = {
+                    report("List cover saved.")
+                })
+            } catch (failure: Exception) {
+                fail(failure, expected)
+            } finally {
+                if (valid(expected)) mutable.update { it.copy(busy = false) }
+            }
         }
     }
 
@@ -607,6 +936,7 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         if (state.value.busy || !state.value.connected) return
         epochs.advance()
         searchJob?.cancel()
+        refreshJob?.cancel()
         val expected = epoch
         mutable.update { it.copy(busy = true, error = null, searching = false) }
         viewModelScope.launch {
@@ -622,18 +952,25 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
                             )
                         )
                     if (valid(expected)) {
-                        val fresh = session.accessToken ?: error("Missing secure session")
+                        val fresh = StoredNativeSession(
+                            checkNotNull(session.accessToken), checkNotNull(session.userId),
+                            checkNotNull(session.username), session.expiresAt,
+                        )
+                        check(fresh.userId == accountId)
                         vault.write(fresh)
-                        token = fresh
+                        storedSession = fresh
+                        scheduleSessionExpiry(fresh)
                         epochs.advance()
                         searchJob?.cancel()
                         mutable.update {
                             it.copy(
                                 busy = false,
                                 searching = false,
+                                syncing = false,
                                 message = "Password changed. Your other devices are signed out.",
                             )
                         }
+                        requestSync()
                     }
                 } catch (e: Exception) {
                     if (e is ApiFailure && e.status == 401 && valid(expected)) {
@@ -657,23 +994,26 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun exportBackup() {
-        if (state.value.busy || !state.value.connected) return
+        val snapshot = state.value
+        if (snapshot.busy || !snapshot.workspaceReady || !hasCurrentSession()) return
         val expected = epoch
         mutable.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
-            serial.withLock {
-                if (!valid(expected)) return@withLock
-                try {
-                    val document = api.request("/api/export", token)
-                    if (valid(expected)) {
-                        pendingExport = PendingExport(document, expected, state.value.username)
-                        mutable.update { it.copy(exportReady = true) }
-                    }
-                } catch (e: Exception) {
-                    fail(e, expected)
-                } finally {
-                    if (valid(expected)) mutable.update { it.copy(busy = false) }
+            try {
+                val document = withContext(Dispatchers.Default) { snapshot.workspace.localBackup() }
+                if (!valid(expected)) return@launch
+                if (document.toByteArray(Charsets.UTF_8).size > BACKUP_LIMIT) {
+                    mutable.update { it.copy(error = "This backup is larger than 5 MiB. Sync pending edits or remove some content before exporting.") }
+                    return@launch
                 }
+                pendingExport = PendingExport(document, expected, snapshot.username)
+                mutable.update { it.copy(exportReady = true) }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                if (valid(expected)) mutable.update { it.copy(error = "Couldn’t prepare the backup. Try again.") }
+            } finally {
+                if (valid(expected)) mutable.update { it.copy(busy = false) }
             }
         }
     }
@@ -713,29 +1053,39 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun importBackup(document: String) {
-        try {
-            require(document.toByteArray().size <= 5 * 1024 * 1024) {
-                "This backup is larger than 5 MiB."
-            }
-            val backup = api.json.parseToJsonElement(document).jsonObject
-            val version = (backup["version"] as? JsonPrimitive)?.intOrNull
-            if (version != null && version > state.value.workspace.version) {
-                mutable.update {
-                    it.copy(error = "This backup needs a newer Gather server. Your lists haven’t changed.")
+        val snapshot = state.value
+        if (snapshot.busy || !snapshot.workspaceReady || !hasCurrentSession()) return
+        val queue = "offline-import" in snapshot.capabilities
+        if (!queue && !snapshot.connected) return
+        val expected = epoch
+        mutable.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            var legacy: JsonObject? = null
+            try {
+                val backup = withContext(Dispatchers.Default) {
+                    if (document.toByteArray(Charsets.UTF_8).size > BACKUP_LIMIT)
+                        throw BackupFailure("Choose a Gather backup no larger than 5 MiB.")
+                    val parsed = api.json.parseToJsonElement(document).jsonObject
+                    val imported = parseLocalBackup(parsed)
+                    if (imported.version > snapshot.workspace.version)
+                        throw BackupFailure("This backup needs a newer Gather server.")
+                    if (imported.version < 1) throw BackupFailure("This backup uses an unsupported Gather version.")
+                    if (queue) importPayload(parsed, imported) else parsed
                 }
-                return
+                if (!valid(expected)) return@launch
+                if (queue) enqueueAction(expected, makeOfflineAction("workspace.import", backup, snapshot.workspace))
+                else legacy = backup
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: Exception) {
+                if (valid(expected)) {
+                    val message = if (failure is BackupFailure) failure.message else "Choose a valid Gather backup file."
+                    mutable.update { it.copy(error = message) }
+                }
+            } finally {
+                if (valid(expected)) mutable.update { it.copy(busy = false) }
             }
-            mutation("/api/import", backup)
-        } catch (e: Exception) {
-            mutable.update {
-                it.copy(
-                    error =
-                        if (document.toByteArray().size > 5 * 1024 * 1024)
-                            "Choose a Gather backup no larger than 5 MiB. Your lists haven’t changed."
-                        else
-                            "This isn’t a valid Gather backup. Your lists haven’t changed. Choose another file."
-                )
-            }
+            if (valid(expected)) legacy?.let { mutation("/api/import", it) }
         }
     }
 
@@ -745,6 +1095,18 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
 
     fun dismissNotice() {
         mutable.update { it.copy(error = null, message = null) }
+        if (offline.syncNotice != null) {
+            val expected = epoch
+            viewModelScope.launch {
+                try {
+                    persistOffline(expected, publish = false) { it.copy(syncNotice = null) }
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (_: Exception) {
+                    // The notice stays dismissed for this app session if disk is unavailable.
+                }
+            }
+        }
     }
 
     fun appearance(value: String) {

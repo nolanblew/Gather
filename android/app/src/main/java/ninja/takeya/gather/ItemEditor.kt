@@ -12,7 +12,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import java.util.UUID
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 
 private enum class ItemPanel { Item, AddDetail, Places, Person, Section, Order }
 
@@ -33,6 +35,14 @@ fun ItemForm(
     var text by rememberEditorDraft("text") { original?.text ?: editor.initialText }
     var quantity by rememberEditorDraft("quantity") { original?.quantity.orEmpty() }
     var note by rememberEditorDraft("note") { original?.note.orEmpty() }
+    var descriptionSource by rememberEditorDraft("description-source") { original.descriptionDraft() }
+    var descriptionDraft by rememberEditorDraft("description-draft") { descriptionSource }
+    var subitemSource by rememberEditorDraft("subitem-source") { original?.subitems.orEmpty() }
+    var subitems by rememberEditorDraft("subitems") { subitemSource }
+    var expectedDescription by rememberEditorDraft("expected-description") { original?.description.orEmpty() }
+    var expectedNote by rememberEditorDraft("expected-note") { original?.note.orEmpty() }
+    var expectedSubitems by rememberEditorDraft("expected-subitems") { original?.subitems.orEmpty() }
+    var preparingImage by rememberEditorDraft("preparing-description-image") { false }
     var section by rememberEditorDraft("section") { original?.sectionId ?: editor.sectionId.orEmpty() }
     var availability by rememberEditorDraft("availability") {
         original?.availability ?: editor.filter.draftAvailability()
@@ -47,7 +57,7 @@ fun ItemForm(
     var newPlaces by rememberEditorDraft("new-places") { emptyList<String>() }
     var newPeople by rememberEditorDraft("new-people") { emptyList<String>() }
     var personPickerBaseline by rememberEditorDraft("person-picker-baseline") { recipients to newPeople }
-    var descriptionVisible by rememberEditorDraft("description-visible") { note.isNotBlank() }
+    var descriptionVisible by rememberEditorDraft("description-visible") { note.isNotBlank() || descriptionDraft.isNotEmpty() }
     var quantityVisible by rememberEditorDraft("quantity-visible") { quantity.isNotBlank() }
     var sectionVisible by rememberEditorDraft("section-visible") { section.isNotBlank() }
     var panel by rememberEditorDraft("panel") { ItemPanel.Item }
@@ -61,9 +71,11 @@ fun ItemForm(
         scope.launch { model.ui.editorScroll.scrollTo(0) }
         Unit
     }
-    val enabled = !state.busy
+    val enabled = !state.busy && state.canEditWorkspace
     val organization = state.workspace.version >= 3
     val multiplePeople = state.workspace.version >= 4
+    val richDescriptions = "item-descriptions" in state.capabilities
+    val hasSubchecklist = list.kind == "checklist" && "checklist-subitems" in state.capabilities
     val placesVisible = availability.mode != "unassigned" ||
         (original == null && editor.filter.place == FILTER_UNSET)
     val personVisible = recipients.isNotEmpty() || newPeople.isNotEmpty() ||
@@ -87,6 +99,18 @@ fun ItemForm(
             !latest.availability.equivalent(expectedAvailability)
     val personConflict =
         item != null && latest != null && changingPerson && latest.peopleIds.toSet() != expectedRecipients.toSet()
+    val changingDescription = richDescriptions && descriptionDraft.map { it.block } != descriptionSource.map { it.block }
+    val changingSubitems = hasSubchecklist && subitems != subitemSource
+    val descriptionConflict = item != null && latest != null && changingDescription &&
+        (latest.description != expectedDescription || latest.note != expectedNote)
+    val subitemConflict = item != null && latest != null && changingSubitems && latest.subitems != expectedSubitems
+
+    fun showDescription() {
+        descriptionVisible = true
+        if (descriptionDraft.none { it.block.type != "image" } && descriptionDraft.size < MAX_DESCRIPTION_BLOCKS) {
+            descriptionDraft = listOf(DescriptionEntry()) + descriptionDraft
+        }
+    }
 
     when (panel) {
         ItemPanel.AddDetail -> {
@@ -97,7 +121,7 @@ fun ItemForm(
                 if (organization && !placesVisible && editor.list.usesPlaces) add(placeChoice)
                 if (organization && !personVisible && editor.list.usesRecipients) add(personChoice)
                 if (!descriptionVisible) add("Description" to {
-                    descriptionVisible = true
+                    showDescription()
                     select(ItemPanel.Item)
                 })
                 if (organization && !placesVisible && !editor.list.usesPlaces) add(placeChoice)
@@ -218,13 +242,13 @@ fun ItemForm(
                     list.orderedPayload("itemId" to latest.id, "sectionId" to latest.sectionId, "index" to index + offset),
                 )
             }
-            OutlinedButton(onClick = { move(-1) }, enabled = index > 0 && enabled && state.connected) {
+            OutlinedButton(onClick = { move(-1) }, enabled = index > 0 && enabled) {
                 Icon(Icons.Outlined.ArrowUpward, null, Modifier.size(18.dp))
                 Text("Move up")
             }
             OutlinedButton(
                 onClick = { move(1) },
-                enabled = index in 0 until group.lastIndex && enabled && state.connected,
+                enabled = index in 0 until group.lastIndex && enabled,
             ) {
                 Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(18.dp))
                 Text("Move down")
@@ -233,12 +257,20 @@ fun ItemForm(
         }
         ItemPanel.Item -> {
             SheetHeader(if (duplicating) "Duplicate item" else if (item == null) "Add item" else "Item details")
+            if (!state.connected && state.canEditWorkspace) {
+                Text("Changes will sync when you reconnect.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             FormText(text, { text = it }, "Item", 500, false, enabled, minLines = 1)
-            if (descriptionVisible)
+            if (descriptionVisible && richDescriptions)
+                DescriptionEditor(descriptionDraft, { descriptionDraft = it }, state.workspace.lists, enabled, preparingImage, { preparingImage = it })
+            else if (descriptionVisible)
                 FormText(note, { note = it }, "Description", 4000, false, enabled, minLines = 2)
-            else TextButton(onClick = { descriptionVisible = true }, enabled = enabled) {
+            else TextButton(onClick = ::showDescription, enabled = enabled) {
+                Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
                 Text("Add description")
             }
+            if (hasSubchecklist) SubchecklistEditor(subitems, enabled) { subitems = it }
             if (organization && placesVisible) {
                 val names = availability.placeIds.map(placeName) + newPlaces
                 val summary = when (availability.mode) {
@@ -284,6 +316,31 @@ fun ItemForm(
                 }
                 DetailChoice(if (multiplePeople) "Keep my people" else "Keep my person") { expectedRecipients = latest.peopleIds }
             }
+            if (descriptionConflict) {
+                DraftWarning("The description changed while you were editing.")
+                DetailChoice("Use saved description") {
+                    expectedDescription = latest.description
+                    expectedNote = latest.note
+                    note = latest.note
+                    descriptionSource = latest.descriptionDraft()
+                    descriptionDraft = descriptionSource
+                    showDescription()
+                }
+                DetailChoice("Keep my description") {
+                    expectedDescription = latest.description
+                    expectedNote = latest.note
+                    note = latest.note
+                }
+            }
+            if (subitemConflict) {
+                DraftWarning("The subchecklist changed while you were editing.")
+                DetailChoice("Use saved steps") {
+                    expectedSubitems = latest.subitems
+                    subitemSource = latest.subitems
+                    subitems = subitemSource
+                }
+                DetailChoice("Keep my steps") { expectedSubitems = latest.subitems }
+            }
             val hasMoreDetails = !descriptionVisible || !quantityVisible || !sectionVisible ||
                 (organization && (!placesVisible || !personVisible))
             if (hasMoreDetails)
@@ -294,22 +351,39 @@ fun ItemForm(
                 }
             SaveButton(
                 state,
-                "Save",
+                if (state.connected) "Save" else "Save on this device",
                 text.isNotBlank() && (missingPlaces.isEmpty() || (item != null && !changingPlaces)) &&
                     (missingRecipients.isEmpty() || (item != null && !changingPerson)) &&
                     (!missingSection || (item != null && !changingSection)) && !placesConflict && !personConflict &&
+                    !descriptionConflict && !subitemConflict && !preparingImage &&
                     (!needsPerson || recipients.isNotEmpty() || newPeople.isNotEmpty()),
             ) {
                 val action = if (item == null) "item.create" else "item.update"
-                model.action(
-                    if (multiplePeople) "${action}WithPeople" else action,
-                    list.itemWritePayload(
-                        item, text.trim(), note, quantity, section.ifBlank { null },
+                val description = if (richDescriptions && (item == null || changingDescription)) descriptionDraft.descriptionWrite() else null
+                val fields = list.itemWritePayload(
+                        item, text.trim(), description?.note ?: note, quantity, section.ifBlank { null },
                         availability, recipients, newPlaces, newPeople,
                         if (item == null) Availability() else expectedAvailability,
                         if (item == null) emptyList() else expectedRecipients,
                         multiplePeople,
-                    ),
+                    ).toMutableMap()
+                if (item != null && description != null) {
+                    fields.remove("note")
+                    if (description.note != expectedNote) {
+                        fields += payload("note" to description.note, "expectedNote" to expectedNote)
+                    }
+                }
+                if (description != null && description.blocks != expectedDescription.takeIf { item != null }.orEmpty()) {
+                    fields += payload("description" to description.blocks.map { it.toPayload() })
+                    if (item != null) fields += payload("expectedDescription" to expectedDescription.map { it.toPayload() })
+                }
+                if (hasSubchecklist && (changingSubitems || item == null && subitems.isNotEmpty())) {
+                    fields += payload("subitems" to subitems.map { it.toPayload() })
+                    if (item != null) fields += payload("expectedSubitems" to expectedSubitems.map { it.toPayload() })
+                }
+                model.action(
+                    if (multiplePeople) "${action}WithPeople" else action,
+                    JsonObject(fields),
                     onSuccess = {
                         if (item == null && editor.initialText.isNotEmpty()) model.ui.itemCapture.remove(list.id)
                         model.showSavedItem(list.id, item?.id)
@@ -339,17 +413,19 @@ fun ItemForm(
                                     })
                                 } else select(ItemPanel.Order)
                             },
-                            enabled = state.connected,
+                            enabled = enabled,
                         )
                         DropdownMenuItem(text = { Text("Duplicate item") }, onClick = {
                             actions = false
                             duplicating = true
+                            subitems = subitems.map { it.copy(id = UUID.randomUUID().toString(), checked = false) }
                         })
                         if (organization)
                             DropdownMenuItem(text = { Text("Duplicate for someone else") }, onClick = {
                                 actions = false
                                 duplicating = true
                                 needsPerson = true
+                                subitems = subitems.map { it.copy(id = UUID.randomUUID().toString(), checked = false) }
                                 recipients = emptyList()
                                 newPeople = emptyList()
                                 select(ItemPanel.Person)
@@ -369,13 +445,12 @@ fun ItemForm(
                                     }
                                 )
                             },
-                            enabled = state.connected,
+                            enabled = enabled,
                         )
                     }
                 }
             }
-            if (!state.connected) DraftWarning("You're offline. Reconnect to save changes.")
-            TextButton(onClick = dismiss, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+            TextButton(onClick = dismiss, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
                 Text("Cancel")
             }
         }
