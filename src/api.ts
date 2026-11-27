@@ -1,4 +1,5 @@
 import type { Payload, Workspace, SearchResponse, SearchStatus, ListSharing, InvitationPreview } from './types';
+import { descriptionError, descriptionImageUrl, descriptionLimits, externalDescriptionUrl, subitemLimits } from './itemDetails.ts';
 
 export const AUTH_EXPIRED_EVENT = 'gather-auth-expired';
 
@@ -156,6 +157,36 @@ export function validateBackup(value: unknown): asserts value is Workspace {
       if (!i) fail();
       id(i.id);
       if (!text(i.text, 500, true) || !text(i.quantity, 100) || !text(i.note, 4000) || typeof i.checked !== 'boolean' || !position(i.position) || (i.sectionId !== null && !sections.has(i.sectionId))) fail();
+      if (i.description !== undefined) {
+        if (!Array.isArray(i.description) || i.description.length > descriptionLimits.blocks) fail();
+        for (const block of i.description) {
+          if (!block) { fail(); continue; }
+          if (block.type === 'image') {
+            if (typeof block.dataUrl !== 'string' || !descriptionImageUrl(block.dataUrl) ||
+                !['inline', 'attachment'].includes(block.display) || (block.alt !== undefined && !text(block.alt, descriptionLimits.alt))) fail();
+            continue;
+          }
+          if (!['paragraph', 'bullet', 'numbered', 'checkbox'].includes(block.type) || !Array.isArray(block.runs) || block.runs.length > 500 ||
+              (block.type === 'checkbox' && typeof block.checked !== 'boolean')) fail();
+          for (const run of block.runs) {
+            if (!run || !text(run.text, descriptionLimits.text)) { fail(); continue; }
+            for (const mark of ['bold', 'italic', 'underline', 'strike'] as const) {
+              if (run[mark] !== undefined && typeof run[mark] !== 'boolean') fail();
+            }
+            const link = run.link;
+            if (link !== undefined && (!link || (link.type === 'list' ? !text(link.listId, 100, true) :
+              link.type !== 'external' || typeof link.url !== 'string' || !externalDescriptionUrl(link.url)))) fail();
+          }
+        }
+        if (descriptionError(i.description)) fail();
+      }
+      if (i.subitems !== undefined) {
+        if (!Array.isArray(i.subitems) || i.subitems.length > subitemLimits.count) fail();
+        for (const step of i.subitems) {
+          if (!step || !text(step.text, subitemLimits.text, true) || typeof step.checked !== 'boolean') { fail(); continue; }
+          id(step.id);
+        }
+      }
       if (document.version < 3) continue;
       if (i.recipientId != null && !recipientIds.has(i.recipientId)) fail();
       if (i.recipientIds !== undefined && (Object.hasOwn(i, 'recipientId') || !Array.isArray(i.recipientIds) ||

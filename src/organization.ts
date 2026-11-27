@@ -1,4 +1,5 @@
 import type { Availability, GatherList, Item, Place, PlaceFields, Recipient } from './types';
+import { itemDescriptionText } from './itemDetails.ts';
 import { sha256 } from './sha256.ts';
 
 type NamedPlace = `place:${string}`;
@@ -56,7 +57,8 @@ export function matchesListFilters(item: Item, filters: ListFilters, query = '')
   const personId = namedPersonId(filters.person);
   const recipients = itemRecipientIds(item);
   if (personId ? !recipients.includes(personId) : filters.person === 'unassigned' && recipients.length) return false;
-  return !query || [item.text, item.note, item.quantity].some(text => text.toLocaleLowerCase().includes(query));
+  return !query || [item.text, itemDescriptionText(item), item.quantity, ...(item.subitems ?? []).map(step => step.text)]
+    .some(text => text.toLocaleLowerCase().includes(query));
 }
 
 export function filterLabels(list: GatherList, filters: ListFilters) {

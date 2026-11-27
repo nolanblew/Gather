@@ -7,6 +7,7 @@ import { InstallBanner, InstallSettings } from './InstallGather';
 import { useAuth } from './auth';
 import { ApiError, getCapabilities, getWorkspace, restoreWorkspace, runAction, validateBackup, searchLists, getSearchStatus, uploadListCover } from './api';
 import { byPosition } from './itemOrder';
+import { itemDescriptionText } from './itemDetails';
 import { orderGuard } from './organization';
 import Dialog from './Dialog';
 import ListEditor from './ListEditor';
@@ -38,9 +39,20 @@ const colors: Color[] = ['sage', 'peach', 'lavender', 'sky', 'sand', 'rose'];
 const iconNames = ['list', 'basket', 'gift', 'lightbulb', 'luggage', 'tent', 'home', 'sparkles'];
 const destinationLabels: Record<Destination, string> = { library: 'Your library', favorites: 'Your favorites', templates: 'Reusable templates', archive: 'The archive' };
 
-const matchLabels: Record<string, string> = { title: 'Title', description: 'Description', category: 'Category', section: 'Section', item: 'Item', note: 'Item description', quantity: 'Quantity' };
+const matchLabels: Record<string, string> = { title: 'Title', description: 'Description', category: 'Category', section: 'Section', item: 'Item', note: 'Item description', quantity: 'Quantity', subitem: 'Subchecklist step' };
 function localSearch(lists: GatherList[], categories: Category[], query: string): SearchResult[] {
-  const chunks = lists.flatMap(list => [{ listId: list.id, text: list.title, field: 'title' }, { listId: list.id, text: list.description, field: 'description' }, { listId: list.id, text: categories.find(c => c.id === list.categoryId)?.name || '', field: 'category' }, ...list.sections.map(section => ({ listId: list.id, text: section.title, field: 'section', sectionId: section.id })), ...list.items.flatMap(item => ['item', 'note', 'quantity'].map(field => ({ listId: list.id, text: field === 'item' ? item.text : field === 'note' ? item.note : item.quantity, field, itemId: item.id })))]).filter(c => c.text);
+  const chunks = lists.flatMap(list => [
+    { listId: list.id, text: list.title, field: 'title' },
+    { listId: list.id, text: list.description, field: 'description' },
+    { listId: list.id, text: categories.find(category => category.id === list.categoryId)?.name || '', field: 'category' },
+    ...list.sections.map(section => ({ listId: list.id, text: section.title, field: 'section', sectionId: section.id })),
+    ...list.items.flatMap(item => [
+      { text: item.text, field: 'item' },
+      { text: itemDescriptionText(item), field: 'note' },
+      { text: item.quantity, field: 'quantity' },
+      ...(item.subitems ?? []).map(step => ({ text: step.text, field: 'subitem' })),
+    ].map(match => ({ ...match, listId: list.id, itemId: item.id }))),
+  ]).filter(chunk => chunk.text);
   const exact = chunks.filter(c => c.text.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map(c => ({ listId: c.listId, score: c.field === 'title' ? 100 : 90, match: c, matchType: 'exact' as const }));
   const fuzzy = new Fuse(chunks, { keys: ['text'], threshold: .4, ignoreLocation: true, includeScore: true }).search(query).map(hit => ({ listId: hit.item.listId, score: 60 * (1 - (hit.score || 0)), match: hit.item, matchType: 'fuzzy' as const }));
   const seen = new Set<string>(); return [...exact, ...fuzzy].sort((a, b) => b.score - a.score).filter(hit => { if (seen.has(hit.listId)) return false; seen.add(hit.listId); return true; }).slice(0, 125);
@@ -146,6 +158,13 @@ export default function App() {
     setError('');
     window.scrollTo({ top: 0 });
   };
+  const openLinkedList = (id: string) => {
+    if (id === selectedId || !workspace?.lists.some(list => list.id === id)) return;
+    writeRoute({ destination, categoryId, query, searchAll, selectedId: id }, 'push', { gatherEditorEntry: true });
+    setSelectedId(id);
+    setError('');
+    window.scrollTo({ top: 0 });
+  };
   const openCreated = (list: GatherList) => {
     const collection = { destination: list.isTemplate ? 'templates' as Destination : destination === 'favorites' && list.favorite ? 'favorites' as Destination : 'library' as Destination, categoryId: list.categoryId, query: '', searchAll: false, selectedId: null };
     writeRoute(collection, 'push', { gatherEditorEntry: false });
@@ -153,7 +172,13 @@ export default function App() {
     setDestination(collection.destination); setCategoryId(collection.categoryId); setQuery(''); setSearchAll(false); setSelectedId(list.id); setError(''); window.scrollTo({ top: 0 });
   };
   const listConfirm = (list: GatherList, action: 'archive' | 'delete' | 'reset') => {
-    const config = { archive: ['Archive this list for you?', 'It will move to your Archive. Other people keep seeing it in their own library. All items and progress stay saved.', 'list.update', { listId: list.id, archived: true }, 'Archive for me'], delete: [list.shared ? 'Delete this list for everyone?' : 'Delete this list?', `“${list.title}” and all its items will be permanently deleted.${list.shared ? ' Everyone will lose access.' : ''} Export a backup first if you want to keep a copy.`, 'list.delete', { listId: list.id }, 'Delete list'], reset: ['Start this list again?', `Reset ${list.items.filter(i => i.checked).length} checked items?${list.shared ? ' This resets checks for everyone.' : ''} All item text, notes, quantities and sections stay as they are.`, 'list.reset', { listId: list.id }, 'Start again'] } as const;
+    const checkedItems = list.items.filter(item => item.checked).length;
+    const checkedSteps = list.items.flatMap(item => item.subitems ?? []).filter(step => step.checked).length;
+    const resetCounts = [
+      checkedItems ? `${checkedItems} checked ${checkedItems === 1 ? 'item' : 'items'}` : '',
+      checkedSteps ? `${checkedSteps} checked ${checkedSteps === 1 ? 'step' : 'steps'}` : '',
+    ].filter(Boolean).join(' and ');
+    const config = { archive: ['Archive this list for you?', 'It will move to your Archive. Other people keep seeing it in their own library. All items and progress stay saved.', 'list.update', { listId: list.id, archived: true }, 'Archive for me'], delete: [list.shared ? 'Delete this list for everyone?' : 'Delete this list?', `“${list.title}” and all its items will be permanently deleted.${list.shared ? ' Everyone will lose access.' : ''} Export a backup first if you want to keep a copy.`, 'list.delete', { listId: list.id }, 'Delete list'], reset: ['Start this list again?', `Reset ${resetCounts || 'checkmarks'}?${list.shared ? ' This resets checks for everyone.' : ''}`, 'list.reset', { listId: list.id }, 'Start again'] } as const;
     const [title, message, type, payload, label] = config[action]; confirm(title, message, type, payload, label);
   };
   const search = query.trim();
@@ -198,6 +223,7 @@ export default function App() {
       <div className="save-status" aria-live="polite">{busy ? 'Saving…' : notice}</div>
       {error && !selected && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={18} /></button></div>}
       {!workspace ? <div className="loading-panel">{loadError ? <><h1>We couldn’t open your lists</h1><p>{loadError}</p><button className="primary" onClick={() => load(true)}>Retry</button></> : <><Leaf size={36} /><h1>Opening your lists…</h1></>}</div> : selected ? <ListEditor key={selected.id} list={selected} category={categories.find(category => category.id === selected.categoryId)}
+        lists={workspace.lists} openLinkedList={openLinkedList} richDescriptions={features.includes('item-descriptions')} subchecklists={features.includes('checklist-subitems')}
         icon={<ListIcon name={selected.icon} size={34} />} badges={<Badges list={selected} />} organization={workspace.version >= 3} busy={busy} error={error} clearError={() => setError('')} mutate={mutate} back={backToCollection}
         savedView={listViews.current.get(selected.id)} updateView={view => listViews.current.set(selected.id, view)}
         edit={() => { setError(''); setModal({ kind: 'list', list: selected }); }} section={section => { setError(''); setModal({ kind: 'section', list: selected, section }); }}

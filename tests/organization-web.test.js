@@ -129,3 +129,27 @@ test('v4 backup validates multi-person references while retaining v3 singleton s
   v3.lists[0].items[0].recipientId = 'a';
   assert.doesNotThrow(() => validateBackup(v3));
 });
+
+test('item filtering and additive backups include formatted descriptions and subchecklists', () => {
+  const backup = seedWorkspace();
+  const [first, target] = backup.lists;
+  const row = first.items[0];
+  row.description = [
+    { type: 'paragraph', runs: [{ text: 'Picnic', bold: true }, { text: ' plan', link: { type: 'list', listId: target.id } }] },
+    { type: 'checkbox', checked: false, runs: [{ text: 'Find a park', italic: true }] },
+  ];
+  row.subitems = [{ id: 'pack-the-basket', text: 'Pack the basket', checked: true }];
+  assert.equal(matchesListFilters(row, emptyFilters, 'picnic plan'), true);
+  assert.equal(matchesListFilters(row, emptyFilters, 'the basket'), true);
+  assert.doesNotThrow(() => validateBackup(backup));
+
+  for (const modify of [
+    copy => { copy.description[0].runs[0].link = { type: 'external', url: 'javascript:void(0)' }; },
+    copy => { copy.description[1].checked = 'false'; },
+    copy => { copy.subitems.push({ ...copy.subitems[0] }); },
+  ]) {
+    const invalid = structuredClone(backup);
+    modify(invalid.lists[0].items[0]);
+    assert.throws(() => validateBackup(invalid), /not a valid Gather backup/);
+  }
+});

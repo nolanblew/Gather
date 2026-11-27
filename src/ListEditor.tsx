@@ -7,6 +7,8 @@ import { useAuth } from './auth';
 import Dialog from './Dialog';
 import GroupOrderDialog from './GroupOrderDialog';
 import ItemEditor, { makeItemDraft, PersonPicker, PlacesPicker } from './ItemEditor';
+import RichDescription from './RichDescription';
+import { SubchecklistPreview } from './Subchecklist';
 import normalizeCover from './normalizeCover';
 import { DescriptionPreview, DictionaryDialog, ViewDialog } from './OrganizationDetails';
 import { byPosition, canonicalItemGroups, itemGroupIds, itemOrdinals, reorderItemIds, sortItemGroupIds, splitItemGroups, type ItemGrouping, type ItemSort } from './itemOrder';
@@ -28,6 +30,10 @@ export interface ListView {
 
 interface Props {
   list: GatherList;
+  lists: Pick<GatherList, 'id' | 'title'>[];
+  openLinkedList: (id: string) => void;
+  richDescriptions: boolean;
+  subchecklists: boolean;
   category?: Category;
   icon: ReactNode;
   badges: ReactNode;
@@ -69,7 +75,7 @@ function ActionMenu({ label, children }: { label: string; children: ReactNode })
   </details>;
 }
 
-export default function ListEditor({ list, category, icon, badges, organization, busy, error, clearError, savedView, updateView, mutate, back, edit, section, removeSection, clone, listConfirm, share, openAppearance, openSettings, uploadCover }: Props) {
+export default function ListEditor({ list, lists, openLinkedList, richDescriptions, subchecklists, category, icon, badges, organization, busy, error, clearError, savedView, updateView, mutate, back, edit, section, removeSection, clone, listConfirm, share, openAppearance, openSettings, uploadCover }: Props) {
   const { session } = useAuth();
   const sortKey = `gather-list-sort:${session.userId || session.username}:${list.id}`;
   const [draft, setDraft] = useState('');
@@ -104,7 +110,9 @@ export default function ListEditor({ list, category, icon, badges, organization,
   const reviewOrderId = useRef('');
   const previousList = useRef(list);
   const done = list.items.filter(item => item.checked).length;
+  const doneSteps = list.items.some(item => item.subitems?.some(step => step.checked));
   const isChecklist = list.kind !== 'notes' && !list.isTemplate;
+  const listIds = useMemo(() => new Set(lists.map(entry => entry.id)), [lists]);
   const displayedSort = mode === 'reorder' ? 'manual' : sort;
   const groups = useMemo(() => canonicalItemGroups(list, displayedSort), [list, displayedSort]);
   const ordinals = useMemo(() => list.numbered ? itemOrdinals(list) : null, [list]);
@@ -136,7 +144,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
   const filtered = usingFilters || Boolean(filterQuery);
   const isVisible = (item: Item) => matchesListFilters(item, activeFilters, filterQuery);
   const shown = list.items.filter(isVisible).length;
-  const detailsExist = list.items.some(item => Boolean(item.note || item.quantity || itemRecipientIds(item).length || item.availability?.mode === 'anywhere' || item.availability?.placeIds.length));
+  const detailsExist = list.items.some(item => Boolean(item.note || item.description?.length || item.subitems?.length || item.quantity || itemRecipientIds(item).length || item.availability?.mode === 'anywhere' || item.availability?.placeIds.length));
   const summary = [...filterLabels(list, activeFilters), ...(filterQuery ? [query.trim()] : []), `${shown} shown`].join(' · ');
   const defaults = filterDefaults(activeFilters);
   const defaultLabels = [activePlace && places.get(activePlace) ? placeLabel(places.get(activePlace)!) : activeFilters.place === 'anywhere' ? 'Anywhere' : activeFilters.place === 'unassigned' ? 'No places set' : '',
@@ -349,7 +357,17 @@ export default function ListEditor({ list, category, icon, badges, organization,
           onClick={() => openItem(item)}>
           {contents}
         </button>
-        {showDetails && item.note && <DescriptionPreview text={item.note} className="item-description" />}
+        {showDetails && (item.description?.length ? <RichDescription blocks={item.description}
+          navigation={{ listIds, openList: openLinkedList }} busy={busy || !richDescriptions} toggle={(index, checked) => {
+            const description = item.description?.map((block, position) => position === index && block.type === 'checkbox' ? { ...block, checked } : block);
+            if (description) void mutate('item.updateDescription', {
+              listId: list.id, itemId: item.id, description, expectedDescription: item.description,
+            });
+          }} /> : item.note && <DescriptionPreview text={item.note} className="item-description" />)}
+        {showDetails && list.kind === 'checklist' && Boolean(item.subitems?.length) && <SubchecklistPreview itemText={item.text}
+          value={item.subitems!} busy={busy || !subchecklists || !isChecklist}
+          expandedBySearch={Boolean(filterQuery && item.subitems?.some(step => step.text.toLocaleLowerCase().includes(filterQuery)))}
+          toggle={step => void mutate('subitem.update', { listId: list.id, itemId: item.id, subitemId: step.id, checked: !step.checked })} />}
       </div>
       <button className="icon-button item-menu" aria-label={`Edit ${item.text}`} onClick={() => openItem(item)}><ChevronRight size={18} aria-hidden="true" /></button>
     </div>;
@@ -427,7 +445,7 @@ export default function ListEditor({ list, category, icon, badges, organization,
           <button onClick={share}>{list.role === 'editor' ? 'People & access' : 'Share list'}</button>
           <button onClick={clone}>{list.isTemplate ? 'Start list' : 'Make a private copy'}</button>
           {!list.isTemplate && list.role !== 'editor' && <button disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, isTemplate: true })}>Make a template</button>}
-          {isChecklist && !list.archived && done > 0 && <button onClick={() => listConfirm('reset')}>Start again</button>}
+          {isChecklist && !list.archived && (done > 0 || doneSteps) && <button onClick={() => listConfirm('reset')}>Start again</button>}
           {list.archived ? <button disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, archived: false })}>Restore for me</button> : <button onClick={() => listConfirm('archive')}>Archive for me</button>}
           {list.role !== 'editor' && <button className="danger-text" onClick={() => listConfirm('delete')}>Delete list</button>}
           <button className="list-mobile-setting" onClick={openAppearance}>Appearance</button>
@@ -597,7 +615,8 @@ export default function ListEditor({ list, category, icon, badges, organization,
       />}
     </Dialog>}
     {(overlay === 'place' || overlay === 'recipient') && <DictionaryDialog list={list} kind={overlay} busy={busy} error={error} clearError={clearError} mutate={mutate} close={() => { clearError(); setOverlay(null); }} />}
-    {editing && <ItemEditor list={list} initial={editing.item} organization={organization} filtered={filtered} busy={busy} error={error} clearError={clearError} mutate={mutate} saved={editingSaved} close={() => { clearError(); closeEditing(); }} useManualOrder={() => chooseSort('manual')} showFullOrder={() => {
+    {editing && <ItemEditor list={list} lists={lists} initial={editing.item} organization={organization} richDescriptions={richDescriptions}
+      subchecklists={subchecklists && list.kind === 'checklist'} filtered={filtered} busy={busy} error={error} clearError={clearError} mutate={mutate} saved={editingSaved} close={() => { clearError(); closeEditing(); }} useManualOrder={() => chooseSort('manual')} showFullOrder={() => {
       clearFilters();
       chooseSort('manual');
       if (editing.item.checked) setDoneOpen(true);
