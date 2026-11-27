@@ -1,6 +1,10 @@
 package ninja.takeya.gather
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.net.Uri
+import android.util.LruCache
+import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
@@ -31,6 +35,7 @@ data class GatherState(
     val captureId: Long = 0,
     val exportReady: Boolean = false,
     val appearance: String = "system",
+    val capabilities: Set<String> = emptySet(),
 ) {
     val selected
         get() = workspace.lists.firstOrNull { it.id == selectedId }
@@ -59,6 +64,10 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     private val api = GatherApi()
     private val vault = TokenVault(application)
     private val preferences = application.getSharedPreferences("appearance", 0)
+    private val itemViewPreferences = application.getSharedPreferences("item-view", 0)
+    private val covers = object : LruCache<Pair<String, String>, Bitmap>(16 * 1024) {
+        override fun sizeOf(key: Pair<String, String>, value: Bitmap) = (value.allocationByteCount + 1023) / 1024
+    }
     private val mutable =
         MutableStateFlow(
             GatherState(appearance = preferences.getString("theme", "system") ?: "system")
@@ -73,6 +82,8 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
     private var searchJob: Job? = null
     private var authJob: Job? = null
     private var refreshJob: Job? = null
+    private var capabilitiesJob: Job? = null
+    private var capabilitiesEpoch: Long? = null
 
     // Kept out of both Compose state and saved instance bundles (backups can be 5 MiB).
     private data class PendingExport(val document: String, val epoch: Long, val username: String?)
@@ -104,20 +115,41 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
                 error is ApiFailure && error.code in setOf("ORDER_TOKEN_REQUIRED", "ORDER_CHANGED") ->
                     "The list order changed. Review the latest order and try again."
                 error is ApiFailure -> error.message
+                error is CoverPreparationFailure -> error.message.orEmpty()
                 interruptedWrite -> "Could not confirm the save. Check the list before trying again."
                 else -> "Can’t connect to Gather. Check your connection and try again."
             }
         mutable.update {
             it.copy(
                 error = message,
-                connected = error is ApiFailure && it.connected,
+                connected = (error is ApiFailure || error is CoverPreparationFailure) && it.connected,
             )
         }
     }
 
     private suspend fun workspace(expected: Long) {
         val result = api.decode<Workspace>(api.request("/api/workspace", token))
-        if (valid(expected)) mutable.update { current -> current.adoptWorkspace(result) }
+        if (valid(expected)) {
+            mutable.update { current -> current.adoptWorkspace(result) }
+            refreshCapabilities(expected)
+        }
+    }
+
+    private fun refreshCapabilities(expected: Long) {
+        if (capabilitiesEpoch == expected || capabilitiesJob?.isActive == true) return
+        capabilitiesJob = viewModelScope.launch {
+            try {
+                val features = api.decode<ApiCapabilities>(api.request("/api/capabilities")).features.toSet()
+                if (valid(expected)) {
+                    capabilitiesEpoch = expected
+                    mutable.update { it.copy(capabilities = features) }
+                }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                // The optional capabilities endpoint must not block workspace use.
+            }
+        }
     }
 
     private suspend fun verifySession() {
@@ -145,6 +177,8 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         val expected = epoch
         authJob?.cancel()
         refreshJob?.cancel()
+        capabilitiesJob?.cancel()
+        covers.evictAll()
         token = null
         vault.clear()
         mutable.update {
@@ -155,6 +189,7 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
                 workspace = Workspace(),
                 username = null,
                 connected = false,
+                capabilities = emptySet(),
             )
         }
         authJob =
@@ -185,6 +220,8 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         ui.clearAccount()
         pendingExport = null
         refreshJob?.cancel()
+        capabilitiesJob?.cancel()
+        covers.evictAll()
         epochs.advance()
         token = null
         vault.clear()
@@ -254,7 +291,28 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
             state.value.error != null
 
     fun select(id: String?) {
+        val previous = state.value.selectedId
+        if (previous != null && previous != id) {
+            ui.itemSelections.remove(previous)
+            if (ui.reorderListId == previous) ui.reorderListId = null
+            if (ui.itemSearchListId == previous) ui.itemSearchListId = null
+        }
         mutable.update { it.copy(selectedId = id, sharing = null) }
+    }
+
+    private fun itemSortKey(listId: String): String? = state.value.username?.let { username ->
+        java.util.UUID.nameUUIDFromBytes(payload("account" to username, "listId" to listId).toString().toByteArray()).toString()
+    }
+
+    fun itemSort(list: GatherList): ItemSort {
+        ui.itemSorts[list.id]?.let { return it }
+        val stored = itemSortKey(list.id)?.let { itemViewPreferences.getString(it, null) }
+        return ItemSort.entries.firstOrNull { it.name == stored } ?: list.defaultItemSort()
+    }
+
+    fun setItemSort(listId: String, sort: ItemSort) {
+        itemSortKey(listId)?.let { key -> itemViewPreferences.edit { putString(key, sort.name) } }
+        ui.itemSorts[listId] = sort
     }
 
     fun collection(scope: String) {
@@ -332,6 +390,14 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         body: JsonElement,
         selectCreated: Boolean = false,
         after: (() -> Unit)? = null,
+    ) = mutateWorkspace(selectCreated, after) {
+        api.decode<Workspace>(api.request(path, token, body))
+    }
+
+    private fun mutateWorkspace(
+        selectCreated: Boolean = false,
+        after: (() -> Unit)? = null,
+        request: suspend () -> Workspace,
     ) {
         if (state.value.busy || !state.value.connected) return
         val expected = epoch
@@ -340,7 +406,7 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
             serial.withLock {
                 try {
                     if (!valid(expected)) return@withLock
-                    val result = api.decode<Workspace>(api.request(path, token, body))
+                    val result = request()
                     if (valid(expected)) {
                         mutable.update { current -> current.adoptWorkspace(result, selectCreated) }
                         after?.invoke()
@@ -351,6 +417,7 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
                     // replay a write.
                     if (
                         e !is CancellationException &&
+                            e !is CoverPreparationFailure &&
                             valid(expected) &&
                             (e !is ApiFailure || e.status in listOf(403, 404, 409))
                     )
@@ -363,11 +430,45 @@ class GatherViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    internal suspend fun loadListCover(listId: String, coverId: String): Bitmap? {
+        val expected = epoch
+        val accessToken = token ?: return null
+        fun canUseCover() = valid(expected) && state.value.workspace.lists.any { it.id == listId && it.coverId == coverId }
+        if (!canUseCover()) return null
+        val key = listId to coverId
+        covers.get(key)?.let { return it }
+        return try {
+            val bytes = api.listCover(listId, coverId, accessToken)
+            val bitmap = decodeListCover(bytes, coverId) ?: return null
+            if (!canUseCover()) return null
+            covers.put(key, bitmap)
+            bitmap
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun uploadListCover(listId: String, image: Uri) {
+        val accessToken = token ?: return
+        if ("list-covers" !in state.value.capabilities || state.value.workspace.lists.none { it.id == listId }) return
+        val expected = epoch
+        mutateWorkspace(after = { report("List cover updated.") }) {
+            val bytes = prepareListCover(getApplication<Application>().contentResolver, image)
+            if (!valid(expected)) throw CancellationException()
+            api.decode<Workspace>(api.uploadListCover(listId, bytes, accessToken))
+        }
+    }
+
     fun showSavedItem(listId: String, existingId: String?) {
         val snapshot = state.value.workspace
         val itemId = existingId ?: snapshot.createdItemId ?: return
-        val item = snapshot.lists.find { it.id == listId }?.items?.find { it.id == itemId } ?: return
-        if (ui.filters[listId]?.matches(item) == false) ui.hiddenSavedItems[listId] = itemId
+        val list = snapshot.lists.find { it.id == listId } ?: return
+        val item = list.items.find { it.id == itemId } ?: return
+        if (ui.filters[listId]?.matches(item) == false || !list.matchesItemQuery(item, ui.itemQueries[listId].orEmpty())) {
+            ui.hiddenSavedItems[listId] = itemId
+        }
     }
 
     fun loadSharing(listId: String) =

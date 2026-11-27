@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package ninja.takeya.gather
 
 import androidx.compose.foundation.layout.*
@@ -11,6 +13,9 @@ import androidx.compose.ui.unit.dp
 fun FilterForm(editor: Editor.Filters, state: GatherState, model: GatherViewModel, dismiss: () -> Unit) {
     val list = state.workspace.lists.find { it.id == editor.list.id } ?: editor.list
     var filter by rememberEditorDraft("filter") { editor.filter }
+    val initialSort = model.itemSort(list)
+    var sort by rememberEditorDraft("item-sort") { initialSort }
+    var grouping by rememberEditorDraft("item-grouping") { model.ui.itemGrouping[list.id] ?: ItemGrouping.None }
     val showPlaces = list.usesPlaces || editor.list.usesPlaces || editor.filter.place != null
     val showPeople = list.usesRecipients || editor.list.usesRecipients || editor.filter.person != null
     val showCompletion = list.kind == "checklist" &&
@@ -20,7 +25,21 @@ fun FilterForm(editor: Editor.Filters, state: GatherState, model: GatherViewMode
         val person = filter.person?.takeIf { id -> id == FILTER_UNSET || list.recipients.any { it.id == id } }
         filter = filter.copy(place = place, person = person, notDone = filter.notDone && list.kind == "checklist")
     }
-    SheetHeader("Filters")
+    SheetHeader(if (editor.view) "View" else "Filters")
+    if (editor.view) {
+        Choice("Sort by", sort.name, ItemSort.entries.map { it.name to it.label }) { sort = ItemSort.valueOf(it) }
+        Text("Group by", style = MaterialTheme.typography.labelLarge)
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            ItemGrouping.entries.forEachIndexed { index, option ->
+                SegmentedButton(
+                    selected = grouping == option,
+                    onClick = { grouping = option },
+                    shape = SegmentedButtonDefaults.itemShape(index, ItemGrouping.entries.size),
+                    icon = {},
+                ) { Text(option.label) }
+            }
+        }
+    }
     if (showPlaces) {
         val unassigned = list.items.count { it.availability.mode == "unassigned" }
         val usedPlaces = list.items.flatMap { it.availability.placeIds }.toSet()
@@ -32,23 +51,29 @@ fun FilterForm(editor: Editor.Filters, state: GatherState, model: GatherViewMode
                     .sortedBy { it.label.lowercase() }.map { it.id to it.label } +
                 listOf(FILTER_ANYWHERE to "Anywhere only", FILTER_UNSET to "No places set"),
             unassigned,
+            compact = editor.view,
         ) { filter = filter.copy(place = it.ifEmpty { null }) }
     }
     if (showPeople) {
-        val usedPeople = list.items.mapNotNull { it.recipientId }.toSet()
+        val usedPeople = list.items.flatMap { it.peopleIds }.toSet()
         FilterOptions(
             "For someone",
             filter.person.orEmpty(),
-            listOf("" to "No filter", FILTER_UNSET to "Not set") +
+            listOf("" to (if (editor.view) "All people" else "No filter"), FILTER_UNSET to "Not set") +
                 list.recipients.filter { it.id in usedPeople || it.id == filter.person || it.id == editor.filter.person }
                     .sortedBy { it.name.lowercase() }.map { it.id to it.name },
+            compact = editor.view,
         ) { filter = filter.copy(person = it.ifEmpty { null }) }
     }
     if (showCompletion && list.kind == "checklist")
-        FilterOptions("Completion", if (filter.notDone) "not-done" else "", listOf("" to "All items", "not-done" to "Not done")) {
+        FilterOptions(
+            "Completion", if (filter.notDone) "not-done" else "",
+            listOf("" to "All items", "not-done" to "Not done"),
+            compact = editor.view,
+        ) {
             filter = filter.copy(notDone = it == "not-done")
         }
-    val count = list.items.count(filter::matches)
+    val count = list.viewItems(sort, filter, model.ui.itemQueries[list.id].orEmpty()).size
     Text(if (count == 1) "1 item matches" else "$count items match", style = MaterialTheme.typography.bodyMedium)
     if (list.numbered && count < list.items.size)
         Text("Numbers follow the full list order.", style = MaterialTheme.typography.bodySmall)
@@ -58,6 +83,10 @@ fun FilterForm(editor: Editor.Filters, state: GatherState, model: GatherViewMode
             onClick = {
                 if (filter.active) model.ui.filters[list.id] = filter
                 else model.ui.filters.remove(list.id)
+                if (editor.view) {
+                    if (sort != initialSort) model.setItemSort(list.id, sort)
+                    model.ui.itemGrouping[list.id] = grouping
+                }
                 model.ui.hiddenSavedItems.remove(list.id)
                 dismiss()
             },
@@ -72,9 +101,10 @@ private fun FilterOptions(
     selection: String,
     options: List<Pair<String, String>>,
     unassigned: Int? = null,
+    compact: Boolean = false,
     change: (String) -> Unit,
 ) {
-    if (options.size > 8) {
+    if (compact || options.size > 8) {
         Choice(label, selection, options, onChange = change)
         if (unassigned != null)
             Text("$unassigned without a place", style = MaterialTheme.typography.bodySmall)
@@ -180,7 +210,7 @@ fun DefinitionsForm(
     TextButton(
         onClick = {
             val count = if (isPlace) list.items.count { editingId in it.availability.placeIds }
-                else list.items.count { editingId == it.recipientId }
+                else list.items.count { editingId in it.peopleIds }
             val label = place?.label ?: person?.name ?: return@TextButton
             val itemCount = if (count == 1) "1 item" else "$count items"
             val actionLabel = if (isPlace) "Delete place" else "Delete person"

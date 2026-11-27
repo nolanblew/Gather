@@ -47,9 +47,18 @@ Store the native token using Android Keystore-backed encrypted application-priva
 
 Native clients send JSON for POSTs and omit browser `Origin`, `Sec-Fetch-Site` and cookies. Native routes and bearer-authenticated reads enforce the same origin validation as writes: supplied cross-site origins/Fetch Metadata are rejected, and no cross-origin CORS access is enabled. Tokens are accepted only in Authorization headers, never query parameters or request bodies. TLS termination remains the responsibility of the deployment proxy.
 
-`GET /api/capabilities` is a public, non-cacheable compatibility probe returning `{ "apiVersion": 1, "workspaceVersion": 3, "authentication": ["cookie", "bearer"], "features": ["sharing", "search", "import", "export", "list-organization", "numbered-lists", "guarded-order"] }`. `apiVersion` describes this HTTP contract independently of backup `version`. Native clients should verify bearer support before presenting sign-in against a configured server. Clients should also check feature support before offering organization controls or sending a version 3 backup.
+`GET /api/capabilities` is a public, non-cacheable compatibility probe returning `{ "apiVersion": 1, "workspaceVersion": 4, "authentication": ["cookie", "bearer"], "features": ["sharing", "search", "import", "export", "list-organization", "numbered-lists", "guarded-order", "multiple-recipients", "bulk-assignments", "visible-item-order", "group-order", "list-covers"] }`. `apiVersion` describes this HTTP contract independently of backup `version`. Native clients should verify bearer support before presenting sign-in against a configured server. Clients should also check feature support before offering organization controls or importing a backup from a newer workspace version.
 
-All URLs are same-origin. Errors have `{ "error": "Human-readable message" }`, an optional `code`, and a non-2xx status. Writes require JSON, are limited to 5 MiB, and reject cross-site origins. Auth, invitation and sharing bodies are limited to 8 KiB. Vite's development proxy must preserve the incoming Host (`changeOrigin: false`). A successful list mutation returns the account's authoritative workspace. Clients send granular commands and serialize pending actions. Identity and permissions come from the session, never from submitted owner fields.
+All URLs are same-origin. Errors have `{ "error": "Human-readable message" }`, an optional `code`, and a non-2xx status. JSON writes are limited to 5 MiB. All writes reject cross-site origins. Auth, invitation and sharing bodies are limited to 8 KiB. Vite's development proxy must preserve the incoming Host (`changeOrigin: false`). A successful list mutation returns the account's authoritative workspace. Clients send granular commands and serialize pending actions. Identity and permissions come from the session, never from submitted owner fields.
+
+## List covers
+
+The `list-covers` capability enables authenticated cover reads and uploads. The server also advertises `generated-list-covers` when automatic generation is configured. A workspace list with a saved image includes an optional `coverId` content hash.
+
+* `GET /api/lists/{listId}/cover?v={coverId}` returns private WebP bytes for an owner or current editor, or 404 when unavailable.
+* `PUT /api/lists/{listId}/cover` accepts a raw JPEG, PNG or WebP body up to 2 MiB. Gather checks membership and the request origin, decodes and scales the picture, strips metadata, and returns the updated workspace. This route is the binary exception to JSON writes.
+
+Covers share the lifetime of their owning list in SQLite. Duplicating a list copies its cover. Importing a portable JSON backup creates lists with the built-in artwork. Generation uses only the list title and description. The client sees the new hash on its regular workspace refresh.
 
 ## Sharing endpoints
 
@@ -73,7 +82,7 @@ Workspace list records additionally include `role` (`owner` or `editor`), `owner
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "categories": [{"id":"uuid","name":"Everyday","color":"sage","position":0}],
   "lists": [{
     "id":"uuid", "title":"Groceries", "description":"", "icon":"basket", "color":"sage",
@@ -86,7 +95,7 @@ Workspace list records additionally include `role` (`owner` or `editor`), `owner
 }
 ```
 
-IDs are globally unique. `categoryId` and `sectionId` may be null. Items belong to the enclosing list; section IDs must reference that same list. Render categories/lists/sections by `position` and items by `position` within their section (null is the unsectioned group). Colors: `sage`, `peach`, `lavender`, `sky`, `sand`, `rose`. Icons are short names mapped by the UI. Import remaps all IDs and references and appends private copies. New entries append after existing content. Relevant reorder/delete operations may normalize positions while preserving relative order.
+IDs are globally unique. `categoryId` and `sectionId` may be null. Items belong to the enclosing list; section IDs must reference that same list. Render categories, lists and sections by `position`. Item positions describe manual order within a section. A null section ID denotes the unsectioned group. Colors: `sage`, `peach`, `lavender`, `sky`, `sand`, `rose`. Icons are short names mapped by the UI. Import remaps all IDs and references and appends private copies. New entries append after existing content. Relevant reorder/delete operations may normalize positions while preserving relative order.
 
 `POST /api/actions` accepts `{ "type": "item.create", "payload": {...} }`:
 
@@ -108,6 +117,10 @@ Successful creation commands return the full workspace plus the exact ID created
 | section.move | listId, sectionId, index (zero-based within sections), expectedOrderToken on numbered lists |
 | item.create | listId, text, quantity?, note?, checked?, sectionId?, availability?, recipientId?, newPlaces?, newRecipient?, expectedOrderToken on numbered lists |
 | item.update | listId, itemId, text?, quantity?, note?, checked?, sectionId?, availability?, recipientId?, newPlaces?, newRecipient?, expectedAvailability or expectedRecipientId for corresponding edits, expectedOrderToken when changing sections on numbered lists |
+| item.createWithPeople / item.updateWithPeople | Same item fields as create/update. Use `recipientIds` for existing people and `newRecipients` for inline name objects. Include `expectedRecipientIds` when replacing an existing assignment. |
+| item.bulkAdd | listId, itemIds, placeIds?, recipientIds?, newPlaces?, newRecipients?, expectedAnywhereItemIds? |
+| group.reorder | listId, kind (person or place), groupIds, expectedGroupIds |
+| item.reorderVisible | listId, itemIds in the desired order, expectedOrderToken |
 | item.delete | listId, itemId, expectedOrderToken on numbered lists |
 | item.move | listId, itemId, sectionId, index (zero-based insertion index within destination group), expectedOrderToken on numbered lists |
 | place.create | listId, name, kind?, region?, countryCode? |
@@ -134,17 +147,25 @@ Place deletion removes that ID from assigned items and becomes unassigned when t
 
 The response `orderToken` is derived from the list ID, numbered flag, ordered section IDs including empty sections, and item IDs in each group. Traverse the unsectioned group first, then sections in position order. Equal positions retain array order. Display numbers densely from 1 using the full traversal, with checked rows inline. A numbered structural command and every actual numbering toggle require the displayed `expectedOrderToken`. A missing token returns `409 ORDER_TOKEN_REQUIRED`. A stale token returns `409 ORDER_CHANGED`. Structural commands include item and section creation, deletion and moves, plus `item.update` when the section actually changes. Scalar edits, completion, resets and assignments do not change the token. Refresh on conflicts, preserve the user's draft, and wait for explicit action before retrying.
 
+Version 4 stores a single recipient in `recipientId`, multiple recipients in a sorted `recipientIds` array, and omits both fields when nobody is selected. Send an empty array to clear the people assignment. Legacy scalar requests can update an empty or single assignment. An attempt to replace a multi-person assignment requires the complete expected set. Removing one person from the dictionary preserves everyone else on the item.
+
+`item.bulkAdd` takes distinct item IDs from one list and adds the supplied places and people to every item in a single transaction. Existing named places and people are retained. Adding a named place changes Anywhere or unassigned availability to selected. Clients send the Anywhere item IDs shown in their confirmation as `expectedAnywhereItemIds`. If another target becomes Anywhere before save, the command returns `409 ASSIGNMENT_CHANGED` so the user can review the conversion. The 25-place limit applies to the resulting union on each item. Inline definitions and all selected items commit together.
+
+The stored `items` array retains insertion order for Date added. Manual order uses section-local positions. `item.reorderVisible` places the supplied IDs into their existing slots in the requested order. Filtered-out rows keep their slots. The command requires a current order token even on an unnumbered list, and accepts only rows in one section and one completion bucket for an ordinary checklist. Each grouped occurrence reflects the same underlying item and manual position.
+
+The optional list fields `personGroupOrder` and `placeGroupOrder` store shared display orders independently. Named keys use `person:<id>` or `place:<id>`. Both kinds accept `unassigned`, and places also accept `anywhere`. In `group.reorder`, send the previously read array (or an empty array) as `expectedGroupIds`. A stale expectation returns `409 GROUP_ORDER_CHANGED`. Sending an empty `groupIds` restores default ordering. The same order applies across sections and filters, and leaves item positions intact.
+
 ### Backup compatibility
 
-`POST /api/import` accepts full version 1, 2 and 3 documents and atomically adds private copies after complete validation. List, item, section, category, place and recipient IDs and references are remapped. Import preserves completion history. Clone remaps its children and preserves numbering, definitions and assignments while clearing completion. Version 1 migrates each list to checklist/manual. Version 2 requires valid kind and cadence. Version 3 validates explicit organization fields, including references and duplicate IDs. Unknown properties are discarded. Limits are 100 categories, 1000 lists, 100 sections per list, 5000 items per list and 20000 total items. Text limits are 200 characters for list and section titles, 80 for category names, 500 for item text, 100 for quantity, 4000 for notes and descriptions, and 40 for icons. Required text rejects whitespace-only input. Malformed JSON and invalid documents reject the whole import.
+`POST /api/import` accepts full version 1 through 4 documents and atomically adds private copies after complete validation. List, item, section, category, place and recipient IDs and references are remapped. Import preserves completion history. Clone remaps its children and preserves numbering, definitions and assignments while clearing completion. Version 1 migrates each list to checklist/manual. Version 2 requires valid kind and cadence. Version 3 validates explicit organization fields, including references and duplicate IDs. Unknown properties are discarded. Limits are 100 categories, 1000 lists, 100 sections per list, 5000 items per list and 20000 total items. Text limits are 200 characters for list and section titles, 80 for category names, 500 for item text, 100 for quantity, 4000 for notes and descriptions, and 40 for icons. Required text rejects whitespace-only input. Malformed JSON and invalid documents reject the whole import.
 
-Exports are version 3 with sparse default organization fields. They include owned list content, including place and recipient labels, samples, archived lists, templates, completion history and timestamps. Account records, sharing metadata, conflict tokens and personal display filters are excluded. Keep the original version number when transferring backups.
+Exports are version 4 with sparse default organization fields. They include owned list content, including place and recipient labels, samples, archived lists, templates, completion history and timestamps. Account records, sharing metadata, conflict tokens and personal display filters are excluded. Keep the original version number when transferring backups.
 
 `GET /api/health` returns `{ "status": "ok" }` after checking database readability.
 
 The complete persisted/exported JSON workspace is also limited to 5 MiB in UTF-8 bytes so every exported document remains importable. Growing actions that exceed this aggregate limit reject with status 413 and roll back entirely. The error directs the user to remove content or shorten notes; reducing actions remain available. Import validates the same byte limit, including direct store use.
 
-The Node server entry is `server/index.js`. `HOST` defaults to `127.0.0.1`, `PORT` to `3000`, `DATA_DIR` to `./data`. The built frontend is served from `./dist` with SPA navigation fallback. SQLite stores the workspace document in a durable WAL database, with granular server commands applied inside `BEGIN IMMEDIATE` transactions. Existing version 1 and 2 account documents migrate atomically at startup, preserving IDs, text, checks, positions, timestamps, memberships and preferences. Empty or sample-free documents remain authoritative after restart. Persist the whole data directory (database and WAL files) in Docker.
+The Node server entry is `server/index.js`. `HOST` defaults to `127.0.0.1`, `PORT` to `3000`, `DATA_DIR` to `./data`. The built frontend is served from `./dist` with SPA navigation fallback. SQLite stores the workspace document in a durable WAL database, with granular server commands applied inside `BEGIN IMMEDIATE` transactions. Existing version 1 through 3 account documents migrate atomically at startup, preserving IDs, text, checks, positions, timestamps, memberships and preferences. Empty or sample-free documents remain authoritative after restart. Persist the whole data directory (database and WAL files) in Docker.
 
 `POST /api/search` is a read-only retrieval operation with the same origin/JSON/body checks as other POST endpoints. Payload: `{ "query": "USB-C cable", "scope": "library", "categoryId": null, "limit": 60 }`. Query is text up to 500 characters; scope is `library`, `favorites`, `templates`, `archive`, or explicit `all`; categoryId is null/omitted or an existing category ID; limit is an integer 1–125 (default 60). Results are scoped before ranking. Library/favorites exclude templates and archived lists. Search never changes workspace data.
 

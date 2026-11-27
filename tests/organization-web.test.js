@@ -48,6 +48,17 @@ test('named places include Anywhere, exclude unassigned, and intersect with pers
   assert.equal(placeSummary(anywhere, new Map(), kyoto.place), 'Anywhere');
 });
 
+test('person filters match any assigned person and unassigned means no people', () => {
+  const shared = item('shared', 0, { recipientIds: ['alex', 'maya'] });
+  const legacy = item('legacy', 1, { recipientId: 'maya' });
+  const unset = item('unset', 2);
+  const rows = [shared, legacy, unset];
+  assert.deepEqual(rows.filter(row => matchesListFilters(row, { ...emptyFilters, person: personFilter('alex') })), [shared]);
+  assert.deepEqual(rows.filter(row => matchesListFilters(row, { ...emptyFilters, person: personFilter('maya') })), [shared, legacy]);
+  assert.deepEqual(rows.filter(row => matchesListFilters(row, { ...emptyFilters, person: 'unassigned' })), [unset]);
+  assert.deepEqual([...filterOptions({ items: rows }).people].sort(), ['alex', 'maya']);
+});
+
 test('numbering spans existing sections with stable ties, and moves include checked neighbors', () => {
   const list = {
     numbered: true, kind: 'checklist', orderToken: 'latest',
@@ -98,4 +109,23 @@ test('v3 backup preflight accepts sparse metadata and imported duplicate labels,
     change(invalid);
     assert.throws(() => validateBackup(invalid), /not a valid Gather backup/);
   }
+});
+
+test('v4 backup validates multi-person references while retaining v3 singleton support', () => {
+  const backup = seedWorkspace();
+  backup.version = 4;
+  const list = backup.lists[0];
+  list.recipients = [{ id: 'a', name: 'Alex' }, { id: 'm', name: 'Maya' }];
+  list.items[0].recipientIds = ['a', 'm'];
+  assert.doesNotThrow(() => validateBackup(backup));
+  for (const ids of [['a', 'missing'], ['a', 'a']]) {
+    const invalid = structuredClone(backup);
+    invalid.lists[0].items[0].recipientIds = ids;
+    assert.throws(() => validateBackup(invalid), /not a valid Gather backup/);
+  }
+  const v3 = structuredClone(backup);
+  v3.version = 3;
+  delete v3.lists[0].items[0].recipientIds;
+  v3.lists[0].items[0].recipientId = 'a';
+  assert.doesNotThrow(() => validateBackup(v3));
 });

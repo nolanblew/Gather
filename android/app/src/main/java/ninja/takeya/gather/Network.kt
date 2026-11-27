@@ -17,6 +17,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import okhttp3.*
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -82,6 +83,9 @@ class TokenVault(context: Context) {
 
 class ApiFailure(val status: Int, message: String, val code: String? = null) : IOException(message)
 
+private const val WORKSPACE_RESPONSE_LIMIT = 6 * 1024 * 1024
+internal const val COVER_RESPONSE_LIMIT = 2 * 1024 * 1024
+
 class GatherApi {
     val json = Json {
         ignoreUnknownKeys = true
@@ -95,7 +99,7 @@ class GatherApi {
             .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(false)
             .build()
-    // GETs may safely recover a stale pooled socket; POSTs are never replayed.
+    // GETs may safely recover a stale pooled socket; writes are never replayed.
     private val readClient = client.newBuilder().retryOnConnectionFailure(true).build()
 
     init {
@@ -110,19 +114,39 @@ class GatherApi {
     suspend inline fun <reified T> decode(raw: String): T =
         withContext(Dispatchers.Default) { json.decodeFromString<T>(raw) }
 
-    suspend fun request(path: String, token: String? = null, body: JsonElement? = null): String =
+    suspend fun request(path: String, token: String? = null, body: JsonElement? = null): String {
+        val builder = requestBuilder(BuildConfig.SERVER_URL.trimEnd('/') + path, token)
+        if (body != null) {
+            builder.post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+        }
+        return exchange(builder.build(), WORKSPACE_RESPONSE_LIMIT).toString(Charsets.UTF_8)
+    }
+
+    suspend fun listCover(listId: String, coverId: String, token: String): ByteArray {
+        val url = coverUrl(listId).addQueryParameter("v", coverId).build()
+        val request = requestBuilder(url.toString(), token).header("Accept", "image/webp").build()
+        return exchange(request, COVER_RESPONSE_LIMIT)
+    }
+
+    suspend fun uploadListCover(listId: String, bytes: ByteArray, token: String): String {
+        val request = requestBuilder(coverUrl(listId).build().toString(), token)
+            .put(bytes.toRequestBody("image/webp".toMediaType())).build()
+        return exchange(request, WORKSPACE_RESPONSE_LIMIT).toString(Charsets.UTF_8)
+    }
+
+    private fun requestBuilder(url: String, token: String?): Request.Builder =
+        Request.Builder().url(url)
+            .header("Accept", "application/json")
+            .header("Cache-Control", "no-store")
+            .apply { if (token != null) header("Authorization", "Bearer $token") }
+
+    private fun coverUrl(listId: String): HttpUrl.Builder =
+        BuildConfig.SERVER_URL.toHttpUrl().newBuilder().addPathSegments("api/lists")
+            .addPathSegment(listId).addPathSegment("cover")
+
+    private suspend fun exchange(request: Request, limit: Int): ByteArray =
         suspendCancellableCoroutine { continuation ->
-            val builder =
-                Request.Builder()
-                    .url(BuildConfig.SERVER_URL.trimEnd('/') + path)
-                    .header("Accept", "application/json")
-                    .header("Cache-Control", "no-store")
-            if (token != null) builder.header("Authorization", "Bearer $token")
-            if (body != null)
-                builder.post(
-                    body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-                )
-            val call = (if (body == null) readClient else client).newCall(builder.build())
+            val call = (if (request.method == "GET") readClient else client).newCall(request)
             continuation.invokeOnCancellation { call.cancel() }
             call.enqueue(
                 object : Callback {
@@ -135,14 +159,13 @@ class GatherApi {
                             try {
                                 val stream = it.body?.byteStream()
                                 val bytes =
-                                    stream?.readNBytes(6 * 1024 * 1024 + 1) ?: "{}".toByteArray()
-                                if (bytes.size > 6 * 1024 * 1024)
+                                    stream?.readNBytes(limit + 1) ?: "{}".toByteArray(Charsets.UTF_8)
+                                if (bytes.size > limit)
                                     throw IOException("The response is too large to open.")
-                                val raw = String(bytes, Charsets.UTF_8)
                                 if (!it.isSuccessful) {
                                     val details =
                                         runCatching {
-                                                json.parseToJsonElement(raw).jsonObject
+                                                json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
                                             }
                                             .getOrNull()
                                     throw ApiFailure(
@@ -152,7 +175,7 @@ class GatherApi {
                                         (details?.get("code") as? JsonPrimitive)?.contentOrNull,
                                     )
                                 }
-                                if (continuation.isActive) continuation.resume(raw)
+                                if (continuation.isActive) continuation.resume(bytes)
                             } catch (error: Exception) {
                                 if (continuation.isActive) continuation.resumeWithException(error)
                             }

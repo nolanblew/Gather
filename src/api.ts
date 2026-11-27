@@ -33,13 +33,17 @@ function notifyAuthExpired(path: string, response: Response) {
   }
 }
 
-async function request<T>(path: string, body?: unknown, fallback = 'Unable to save changes. Please try again.', signal?: AbortSignal): Promise<T> {
-  const response = await fetch(path, { cache: 'no-store', credentials: 'same-origin', signal, ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
+async function responseData<T>(path: string, response: Response, fallback: string): Promise<T> {
   const data = await readResponse(response) as { error?: string; code?: string } | null;
   notifyAuthExpired(path, response);
   if (!response.ok) throw new ApiError(data?.error || fallback, response.status, data?.code);
   if (!data || typeof data !== 'object') throw new ApiError('The server returned an invalid response. Please try again.', 502);
   return data as T;
+}
+
+async function request<T>(path: string, body?: unknown, fallback = 'Unable to save changes. Please try again.', signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, { cache: 'no-store', credentials: 'same-origin', signal, ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
+  return responseData<T>(path, response, fallback);
 }
 
 function authSession(value: unknown, requireAuthenticated = false): AuthSession {
@@ -60,6 +64,18 @@ function authSession(value: unknown, requireAuthenticated = false): AuthSession 
 export const getWorkspace = () => request<Workspace>('/api/workspace');
 export const runAction = (type: string, payload: Payload) => request<Workspace>('/api/actions', { type, payload });
 export const restoreWorkspace = (document: unknown) => request<Workspace>('/api/import', document);
+export const getCapabilities = () => request<{ features?: string[] }>('/api/capabilities');
+
+export function listCoverUrl(listId: string, coverId?: string) {
+  const path = `/api/lists/${encodeURIComponent(listId)}/cover`;
+  return coverId ? `${path}?v=${encodeURIComponent(coverId)}` : path;
+}
+
+export async function uploadListCover(listId: string, image: Blob) {
+  const path = listCoverUrl(listId);
+  const response = await fetch(path, { method: 'PUT', cache: 'no-store', credentials: 'same-origin', headers: { 'Content-Type': image.type }, body: image });
+  return responseData<Workspace>(path, response, 'Unable to save the cover. Please try again.');
+}
 
 export async function getSession(): Promise<AuthSession> {
   return authSession(await request<unknown>('/api/auth/session', undefined, 'Unable to verify your session. Please try again.'));
@@ -96,7 +112,7 @@ export async function getSearchStatus(): Promise<SearchStatus> {
 export function validateBackup(value: unknown): asserts value is Workspace {
   const document = value as Workspace;
   const fail = () => { throw new Error('This is not a valid Gather backup. The workspace has not changed.'); };
-  if (!document || ![1, 2, 3].includes(document.version) || !Array.isArray(document.categories) || !Array.isArray(document.lists) || document.categories.length > 100 || document.lists.length > 1000) fail();
+  if (!document || ![1, 2, 3, 4].includes(document.version) || !Array.isArray(document.categories) || !Array.isArray(document.lists) || document.categories.length > 100 || document.lists.length > 1000) fail();
   const ids = new Set<string>();
   const colors = ['sage', 'peach', 'lavender', 'sky', 'sand', 'rose'];
   const text = (s: unknown, max: number, required = false) => typeof s === 'string' && s.length <= max && (!required || !!s.trim());
@@ -114,7 +130,7 @@ export function validateBackup(value: unknown): asserts value is Workspace {
     for (const s of l.sections) { if (!s) fail(); id(s.id); sections.add(s.id); if (!text(s.title, 200, true) || !position(s.position)) fail(); }
     const placeIds = new Set<string>();
     const recipientIds = new Set<string>();
-    if (document.version === 3) {
+    if (document.version >= 3) {
       if ((l.numbered !== undefined && typeof l.numbered !== 'boolean') || (l.places !== undefined && (!Array.isArray(l.places) || l.places.length > 100)) || (l.recipients !== undefined && (!Array.isArray(l.recipients) || l.recipients.length > 200))) fail();
       const label = (value: unknown, required: boolean) => typeof value === 'string' && text(value.trim().replace(/\s+/gu, ' '), 100, required);
       for (const place of l.places || []) {
@@ -128,12 +144,23 @@ export function validateBackup(value: unknown): asserts value is Workspace {
         recipientIds.add(recipient.id);
       }
     }
+    for (const kind of ['person', 'place'] as const) {
+      const keys = l[`${kind}GroupOrder`];
+      if (keys === undefined) continue;
+      const ids = kind === 'person' ? recipientIds : placeIds;
+      if (!Array.isArray(keys) || new Set(keys).size !== keys.length || keys.some(key =>
+        key !== 'unassigned' && !(kind === 'place' && key === 'anywhere') &&
+        !(typeof key === 'string' && key.startsWith(kind + ':') && ids.has(key.slice(kind.length + 1))))) fail();
+    }
     for (const i of l.items) {
       if (!i) fail();
       id(i.id);
       if (!text(i.text, 500, true) || !text(i.quantity, 100) || !text(i.note, 4000) || typeof i.checked !== 'boolean' || !position(i.position) || (i.sectionId !== null && !sections.has(i.sectionId))) fail();
-      if (document.version !== 3) continue;
+      if (document.version < 3) continue;
       if (i.recipientId != null && !recipientIds.has(i.recipientId)) fail();
+      if (i.recipientIds !== undefined && (Object.hasOwn(i, 'recipientId') || !Array.isArray(i.recipientIds) ||
+          i.recipientIds.length > 200 || new Set(i.recipientIds).size !== i.recipientIds.length ||
+          i.recipientIds.some(value => !recipientIds.has(value)))) fail();
       if (i.availability !== undefined) {
         const value = i.availability;
         if (!value || !['unassigned', 'anywhere', 'selected'].includes(value.mode) || !Array.isArray(value.placeIds) || value.placeIds.length > 25 || new Set(value.placeIds).size !== value.placeIds.length || value.placeIds.some(id => !placeIds.has(id)) || (value.mode === 'selected') !== Boolean(value.placeIds.length)) fail();
