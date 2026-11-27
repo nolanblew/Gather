@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Run on the Docker host that owns the existing Gather LAN installation.
+set -euo pipefail
+umask 077
+
+usage() {
+  cat <<'HELP'
+Usage: scripts/deploy-web [--plan] [--ref COMMIT_OR_LOCAL_REF]
+
+Deploy the latest origin/main to the existing Gather LAN service. With --ref,
+use that local Git ref without fetching. --plan resolves the commit and shows
+the running target without building an image or changing the service.
+GATHER_DEPLOY_ROOT defaults to /home/nolan/dockers/gather.
+HELP
+}
+
+plan=false
+ref=
+while (($#)); do
+  case "$1" in
+    --plan) plan=true; shift ;;
+    --ref) [[ -n ${2:-} ]] || { usage >&2; exit 2; }; ref=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+root=$(realpath -e "${GATHER_DEPLOY_ROOT:-/home/nolan/dockers/gather}")
+[[ -L "$root/current" && -d "$root/releases" && -f "$root/current/.env" ]] || {
+  echo 'Expected an existing Gather installation with releases, current and current/.env.' >&2; exit 1;
+}
+
+# A directory lock covers ref resolution, building, stopping and switching.
+exec 9<"$root/releases"
+flock -n 9 || { echo 'Another Gather deployment is in progress.' >&2; exit 1; }
+if [[ -z $ref ]]; then
+  git -C "$repo" fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+  ref=refs/remotes/origin/main
+fi
+commit=$(git -C "$repo" rev-parse --verify --end-of-options "$ref^{commit}")
+active=$(docker ps --filter label=com.docker.compose.project=gather-lan --filter label=com.docker.compose.service=gather --format '{{.ID}}')
+[[ -n $active && $active != *$'\n'* ]] || { echo 'Expected one running gather-lan/gather container.' >&2; exit 1; }
+docker inspect --format 'Current image {{.Config.Image}} · data {{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Name}}{{end}}{{end}}' "$active"
+printf 'Source commit %s\nCurrent release %s\n' "$commit" "$(realpath "$root/current")"
+if "$plan"; then exit 0; fi
+
+if [[ -f "$root/current/source-commit" && $(<"$root/current/source-commit") == "$commit" ]]; then
+  # Confirm the service still uses the image and volume recorded at publication.
+  python3 - "$root/current/deployment.json" "$active" <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+report = json.loads(Path(sys.argv[1]).read_text())
+container, = json.loads(subprocess.check_output(['docker', 'inspect', sys.argv[2]]))
+if (container['Image'] != report['imageId'] or
+    not any(m.get('Name') == report['volume'] and m['Destination'] == '/app/data' for m in container['Mounts'])):
+    sys.exit('The deployed commit matches, but the running installation differs from its healthy release. Inspect it before retrying.')
+PY
+  docker exec "$active" node -e "fetch('http://127.0.0.1:3000/api/health').then(r => r.json()).then(h => process.exit(h.status === 'ok' ? 0 : 1))"
+  echo 'This commit is already deployed and healthy.'
+  exit 0
+fi
+
+release=$(mktemp -d "$root/releases/$(date -u +%Y%m%dT%H%M%SZ)-${commit:0:12}-XXXXXXXX")
+id=$(basename "$release")
+image="gather:$id"
+volume="gather_lan_accounts_${id,,}"
+volume=${volume//-/_}
+printf 'Staging %s\n' "$release"
+git -C "$repo" show "$commit:compose.lan.yaml" > "$release/compose.lan.yaml"
+cp "$repo/scripts/inspect-release-data.mjs" "$release/"
+printf '%s\n' "$commit" > "$release/source-commit"
+git -C "$repo" archive "$commit" | docker build --label "org.opencontainers.image.revision=$commit" --tag "$image" -
+export GATHER_DEPLOY_ROOT="$root"
+python3 "$repo/scripts/deploy-accounts.py" "$release" "$image" "$volume" update
