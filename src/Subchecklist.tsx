@@ -1,5 +1,5 @@
 import { useId, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Check, ChevronDown, ListChecks, MoreHorizontal, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, ListChecks, MoreVertical, Plus, Trash2 } from 'lucide-react';
 import { subitemLimits } from './itemDetails';
 import type { Subitem } from './types';
 
@@ -78,7 +78,7 @@ export function SubchecklistEditor({ value, onChange, open, onOpen }: {
             event.currentTarget.querySelector('summary')?.focus();
           }
         }}>
-          <summary className="icon-button" aria-label={`Actions for step ${step.text || index + 1}`}><MoreHorizontal size={19} aria-hidden="true" /></summary>
+          <summary className="icon-button" aria-label={`Actions for step ${step.text || index + 1}`}><MoreVertical size={19} aria-hidden="true" /></summary>
           <div className="menu-panel">
             <button type="button" disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={16} aria-hidden="true" />Move up</button>
             <button type="button" disabled={index === value.length - 1} onClick={() => move(index, 1)}><ArrowDown size={16} aria-hidden="true" />Move down</button>

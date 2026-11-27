@@ -86,19 +86,19 @@ export function createDescriptionImage(block: DescriptionImage) {
   image.draggable = false;
   wrapper.append(image);
 
-  if (block.display === 'attachment') {
-    const name = document.createElement('span');
-    name.textContent = block.alt || 'Image attachment';
-    wrapper.append(name);
-  }
-
-  const actions = document.createElement('span');
-  actions.className = 'description-image-actions';
+  const menu = document.createElement('details');
+  menu.className = 'context-menu description-inline-menu';
+  const summary = document.createElement('summary');
+  summary.setAttribute('aria-label', block.alt ? `Actions for ${block.alt}` : 'Image actions');
+  summary.textContent = '⋮';
+  const actions = document.createElement('div');
+  actions.className = 'menu-panel';
   actions.append(
-    editorControl('placement', block.display === 'inline' ? 'Move to attachment' : 'Show inline', block.display === 'inline' ? 'Attach' : 'Show inline'),
-    editorControl('remove', 'Remove image', '×'),
+    editorControl('placement', 'Move to attachment', 'Move to attachment'),
+    editorControl('remove', 'Remove image', 'Remove image'),
   );
-  wrapper.append(actions);
+  menu.append(summary, actions);
+  wrapper.append(menu);
   return wrapper;
 }
 
