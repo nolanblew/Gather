@@ -11,6 +11,24 @@ class OfflineActionsTest {
     private fun OfflineAction.write(workspace: Workspace) = (rebase(workspace) as ActionPlan.Write).data
 
     @Test
+    fun deleteDoneSurvivesRestartAndKeepsReopenedAndNewlyCheckedItemsOnSync() {
+        val first = ListItem("first", "Milk", checked = true)
+        val reopened = ListItem("second", "Tea", checked = true, position = 1)
+        val pending = ListItem("third", "Bread", position = 2, subitems = listOf(Subitem("step", "Slice", true)))
+        val list = GatherList("list", "Groceries", items = listOf(first, reopened, pending))
+        val action = makeOfflineAction("list.deleteDone", payload("listId" to list.id, "itemIds" to listOf(first.id, reopened.id)), base(list))
+        val queued = OfflineWorkspace(base(list), outbox = listOf(action))
+        val restored = Json.decodeFromString<OfflineWorkspace>(Json.encodeToString(queued))
+        assertEquals(listOf(pending.copy(position = 0)), restored.projected("Avery").lists.single().items)
+        val updated = base(list.copy(items = listOf(first, reopened.copy(checked = false), pending.copy(checked = true))))
+        val data = action.write(updated)
+        assertEquals(payload("itemIds" to listOf(first.id))["itemIds"], data["itemIds"])
+        val synced = updated.applyOffline(action, data, "Avery").lists.single()
+        assertEquals(listOf(reopened.copy(checked = false, position = 0), pending.copy(checked = true, position = 1)), synced.items)
+        assertTrue(action.rebase(base(synced)) is ActionPlan.Done)
+    }
+
+    @Test
     fun serializedOutboxRestoresDependentCreatesAndExactSubmittedPayload() {
         val empty = OfflineWorkspace(base(), capabilities = setOf("offline-actions"))
         val category = makeOfflineAction("category.create", payload("name" to "Trips"), empty.projected("Avery"))

@@ -152,6 +152,16 @@ export function applyAction(workspace, action) {
   }
   else if (type === 'list.delete') { workspace.lists = workspace.lists.filter(x => x !== l); normalize(workspace.lists); }
   else if (type === 'list.reset') { if (l.kind !== 'checklist' || l.isTemplate || l.archived) fail('Only active checklist working lists can start again.'); l.items.forEach(resetItemCompletion); }
+  else if (type === 'list.deleteDone') {
+    if (l.kind !== 'checklist' || l.isTemplate || l.archived) fail('Only active checklists can delete done items.');
+    if (!Array.isArray(p.itemIds) || !p.itemIds.length || p.itemIds.length > 5000) fail('Choose completed items from this list.');
+    // The user confirmed these IDs. Check completion again against the current list.
+    const confirmed = new Set(p.itemIds.map(id));
+    const remaining = l.items.filter(item => !item.checked || !confirmed.has(item.id));
+    if (remaining.length === l.items.length) return;
+    l.items = remaining;
+    normalizeItems(l);
+  }
   else if (type === 'list.clone') {
     if (workspace.lists.length >= 1000) fail('List limit reached.');
     if (workspace.lists.reduce((n,x) => n+x.items.length,0) + l.items.length > 20000) fail('Workspace item limit reached.');

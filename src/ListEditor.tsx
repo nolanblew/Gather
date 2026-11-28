@@ -32,6 +32,7 @@ interface Props {
   list: GatherList;
   lists: Pick<GatherList, 'id' | 'title'>[];
   openLinkedList: (id: string) => void;
+  canDeleteDone: boolean;
   richDescriptions: boolean;
   subchecklists: boolean;
   category?: Category;
@@ -49,7 +50,7 @@ interface Props {
   section: (section?: Section) => void;
   removeSection: (section: Section) => void;
   clone: () => void;
-  listConfirm: (action: 'archive' | 'delete' | 'reset') => void;
+  listConfirm: (action: 'archive' | 'delete' | 'reset' | 'deleteDone') => void;
   share: () => void;
   openAppearance: () => void;
   openSettings: () => void;
@@ -75,7 +76,7 @@ function ActionMenu({ label, children }: { label: string; children: ReactNode })
   </details>;
 }
 
-export default function ListEditor({ list, lists, openLinkedList, richDescriptions, subchecklists, category, icon, badges, organization, busy, error, clearError, savedView, updateView, mutate, back, edit, section, removeSection, clone, listConfirm, share, openAppearance, openSettings, uploadCover }: Props) {
+export default function ListEditor({ list, lists, openLinkedList, canDeleteDone, richDescriptions, subchecklists, category, icon, badges, organization, busy, error, clearError, savedView, updateView, mutate, back, edit, section, removeSection, clone, listConfirm, share, openAppearance, openSettings, uploadCover }: Props) {
   const { session } = useAuth();
   const sortKey = `gather-list-sort:${session.userId || session.username}:${list.id}`;
   const [draft, setDraft] = useState('');
@@ -446,6 +447,7 @@ export default function ListEditor({ list, lists, openLinkedList, richDescriptio
           <button onClick={clone}>{list.isTemplate ? 'Start list' : 'Make a private copy'}</button>
           {!list.isTemplate && list.role !== 'editor' && <button disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, isTemplate: true })}>Make a template</button>}
           {isChecklist && !list.archived && (done > 0 || doneSteps) && <button onClick={() => listConfirm('reset')}>Start again</button>}
+          {canDeleteDone && isChecklist && !list.archived && done > 0 && <button className="danger-text" disabled={busy} onClick={() => listConfirm('deleteDone')}>Delete done</button>}
           {list.archived ? <button disabled={busy} onClick={() => void mutate('list.update', { listId: list.id, archived: false })}>Restore for me</button> : <button onClick={() => listConfirm('archive')}>Archive for me</button>}
           {list.role !== 'editor' && <button className="danger-text" onClick={() => listConfirm('delete')}>Delete list</button>}
           <button className="list-mobile-setting" onClick={openAppearance}>Appearance</button>

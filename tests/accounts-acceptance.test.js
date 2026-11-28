@@ -418,3 +418,34 @@ test('operator recovery CLI targets one account while preserving its identity, c
   assert.equal((await f.sharing(current, list.id)).members.some(member => member.userId === b.userId), true);
   assert.equal((await f.workspace(b)).lists.some(entry => entry.id === list.id), true);
 });
+
+test('Delete done removes only confirmed, still-checked parents on the shared checklist', async t => {
+  const f = await fixture(t);
+  const { a: owner, b: editor, c: outsider } = f;
+  const { id: listId } = await f.create(owner, 'Groceries');
+  await f.joinList(editor, (await f.invite(owner, listId)).token);
+  const step = { id: 'step-a', text: 'Find a bag', checked: true };
+  const add = async (text, checked, extra = {}) =>
+    (await f.action(owner, 'item.create', { listId, text, checked, ...extra })).createdItemId;
+  const milk = await add('Milk', true);
+  const tea = await add('Tea', true);
+  const apples = await add('Apples', false, { subitems: [step] });
+  const bread = await add('Bread', false);
+  const readList = async () => (await f.workspace(owner)).lists.find(list => list.id === listId);
+  await f.action(owner, 'list.update', { listId, numbered: true, expectedOrderToken: (await readList()).orderToken });
+
+  const selection = { listId, itemIds: [milk, tea] };
+  denied(await f.request(outsider, '/api/actions', { type: 'list.deleteDone', payload: selection }), 'nonmember');
+  await f.action(owner, 'item.update', { listId, itemId: tea, checked: false });
+  await f.action(owner, 'item.update', { listId, itemId: bread, checked: true });
+  await f.action(editor, 'list.deleteDone', selection);
+  await f.action(editor, 'list.deleteDone', selection);
+  const list = await readList();
+  assert.deepEqual(list.items.map(i => [i.id, i.checked, i.position]), [[tea, false, 0], [apples, false, 1], [bread, true, 2]]);
+  assert.deepEqual(list.items[1].subitems, [step]);
+  for (const flags of [{ archived: true }, { isTemplate: true }, { kind: 'notes' }]) {
+    const other = await f.create(owner, 'Ineligible list', flags);
+    const response = await f.request(owner, '/api/actions', { type: 'list.deleteDone', payload: { listId: other.id, itemIds: [bread] } });
+    assert.equal(response.status, 400);
+  }
+});

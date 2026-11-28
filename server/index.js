@@ -66,7 +66,7 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
         }
         if (req.method === 'GET' && url.pathname === '/api/health') { store.health(); return json(200, { status: 'ok' }); }
         if (req.method === 'GET' && url.pathname === '/api/capabilities') {
-          const features = ['sharing', 'search', 'import', 'export', 'list-organization', 'numbered-lists', 'guarded-order', 'multiple-recipients', 'bulk-assignments', 'visible-item-order', 'group-order', 'list-covers', 'item-descriptions', 'checklist-subitems', 'offline-actions', 'offline-import'];
+          const features = ['sharing', 'search', 'import', 'export', 'list-organization', 'numbered-lists', 'guarded-order', 'multiple-recipients', 'bulk-assignments', 'visible-item-order', 'group-order', 'list-covers', 'item-descriptions', 'checklist-subitems', 'offline-actions', 'delete-done', 'offline-import'];
           if (coverGenerationEnabled(coverEnv)) features.push('generated-list-covers');
           return json(200, { apiVersion: 1, workspaceVersion: WORKSPACE_VERSION, authentication: ['cookie', 'bearer'], features });
         }

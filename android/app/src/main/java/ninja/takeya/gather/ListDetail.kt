@@ -681,6 +681,24 @@ private fun ListDetailOptions(
                     },
                     enabled = writable,
                 )
+            if ("delete-done" in state.capabilities && list.kind == "checklist" && !list.isTemplate &&
+                !list.archived && list.items.any { it.checked })
+                DropdownMenuItem(
+                    text = { Text("Delete done") },
+                    leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
+                    onClick = {
+                        more = false
+                        val ids = list.items.filter { it.checked }.map { it.id }
+                        val count = if (ids.size == 1) "1 completed item" else "${ids.size} completed items"
+                        val sharedNotice = if (list.shared) " This affects everyone on the list." else ""
+                        confirm(Confirmation(
+                            "Delete $count?",
+                            "This permanently deletes the completed items and their steps, including items hidden by filters.$sharedNotice",
+                            "Delete done", danger = true,
+                        ) { model.action("list.deleteDone", payload("listId" to list.id, "itemIds" to ids)) })
+                    },
+                    enabled = writable,
+                )
             DropdownMenuItem(
                 text = {
                     Text(
