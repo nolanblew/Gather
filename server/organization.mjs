@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { InputError, bool, fail, id, object, string } from './input.mjs';
+import { remapItemDetails, resetItemCompletion } from './item-details.mjs';
 
 export const WORKSPACE_VERSION = 4;
 const MAX_SELECTED_PLACES = 25;
@@ -176,13 +177,18 @@ function matchingLabels(type, entries, value, qualifiers) {
     qualifiers.every(key => compareLabel(entry[key]) === compareLabel(value[key]))));
 }
 
-function createDefinition(list, type, input, inline = false) {
-  const { field, limit, display, duplicate } = labels[type];
-  const value = definition(type, input, randomUUID());
+function createDefinition(list, type, input, inline = false, resolvedIds) {
+  object(input);
+  const { field, idKey, limit, display, duplicate } = labels[type];
+  const suppliedId = Object.hasOwn(input, idKey) ? id(input[idKey]) : null;
+  const value = definition(type, input, suppliedId ?? randomUUID());
   const entries = list[field] ?? [];
   const qualifiers = ['kind', 'region', 'countryCode'].filter(key => !inline || Object.hasOwn(input, key));
   const matches = matchingLabels(type, entries, value, qualifiers);
-  if (inline && matches.length === 1) return matches[0].id;
+  if (inline && matches.length === 1) {
+    if (suppliedId !== null && suppliedId !== matches[0].id) resolvedIds.set(suppliedId, matches[0].id);
+    return matches[0].id;
+  }
   if (inline && matches.length > 1) fail(`More than one ${display.toLowerCase()} matches. Choose an existing entry or use a more specific name.`);
   if (matches.length) fail(duplicate);
   if (entries.length >= limit) fail(`${display} limit reached.`);
@@ -191,12 +197,12 @@ function createDefinition(list, type, input, inline = false) {
   return value.id;
 }
 
-function resolveAdditions(list, type, existing, drafts, limit) {
+function resolveAdditions(list, type, existing, drafts, limit, resolvedIds) {
   const { field, display } = labels[type];
   const available = new Set((list[field] ?? []).map(value => value.id));
   for (const value of existing) requireReference(available, value, display);
   if (!Array.isArray(drafts) || drafts.length > limit) fail(`Too many new ${field}.`);
-  return [...new Set([...existing, ...drafts.map(value => createDefinition(list, type, value, true))])];
+  return [...new Set([...existing, ...drafts.map(value => createDefinition(list, type, value, true, resolvedIds))])];
 }
 
 function peopleDrafts(payload) {
@@ -226,22 +232,25 @@ export function editAssignments(list, item, payload, update = false) {
     } else if (current.length > 1 || payload.expectedRecipientId !== (current[0] ?? null)) assignmentConflict();
   }
 
+  const resolvedIds = new Map();
   if (editsPlace) {
     const value = availability(payload.availability, draftsPlaces);
     if (draftsPlaces && value.mode !== 'selected') fail('Choose places, Anywhere, or No places set.');
-    value.placeIds = resolveAdditions(list, 'place', value.placeIds, draftsPlaces ? payload.newPlaces : [], MAX_SELECTED_PLACES);
+    value.placeIds = resolveAdditions(list, 'place', value.placeIds, draftsPlaces ? payload.newPlaces : [], MAX_SELECTED_PLACES, resolvedIds);
     setAvailability(item, availability(value));
   }
   if (editsRecipient) {
-    setPeople(item, resolveAdditions(list, 'recipient', recipientIds(payload), peopleDrafts(payload), labels.recipient.limit));
+    setPeople(item, resolveAdditions(list, 'recipient', recipientIds(payload), peopleDrafts(payload), labels.recipient.limit, resolvedIds));
   }
+  if (resolvedIds.size) return { resolvedIds: Object.fromEntries(resolvedIds) };
 }
 
 export function bulkAdd(list, payload, items) {
-  const people = resolveAdditions(list, 'recipient', recipientIds(payload), peopleDrafts(payload), labels.recipient.limit);
+  const resolvedIds = new Map();
+  const people = resolveAdditions(list, 'recipient', recipientIds(payload), peopleDrafts(payload), labels.recipient.limit, resolvedIds);
   const places = resolveAdditions(list, 'place',
     checkedIds(Object.hasOwn(payload, 'placeIds') ? payload.placeIds : [], MAX_SELECTED_PLACES, 'places'),
-    Object.hasOwn(payload, 'newPlaces') ? payload.newPlaces : [], MAX_SELECTED_PLACES);
+    Object.hasOwn(payload, 'newPlaces') ? payload.newPlaces : [], MAX_SELECTED_PLACES, resolvedIds);
   if (!people.length && !places.length) fail('Choose a place or person to add.');
   if (places.length && Object.hasOwn(payload, 'expectedAnywhereItemIds')) {
     const acknowledged = new Set(checkedIds(payload.expectedAnywhereItemIds, items.length, 'items'));
@@ -254,6 +263,7 @@ export function bulkAdd(list, payload, items) {
       setAvailability(item, availability({ mode: 'selected', placeIds }));
     }
   }
+  if (resolvedIds.size) return { resolvedIds: Object.fromEntries(resolvedIds) };
 }
 
 export function editDictionary(list, type, command, payload) {
@@ -297,7 +307,8 @@ export function remapListContent(list, mapping, resetCompletion = false) {
       ? kind + ':' + mapping.get(key.slice(kind.length + 1)) : key));
   }
   for (const item of result.items) {
-    if (resetCompletion) item.checked = false;
+    remapItemDetails(item, mapping);
+    if (resetCompletion) resetItemCompletion(item);
     if (item.sectionId !== null) item.sectionId = mapping.get(item.sectionId);
     setPeople(item, peopleOn(item).map(id => mapping.get(id)));
     if (item.availability) {
@@ -307,9 +318,14 @@ export function remapListContent(list, mapping, resetCompletion = false) {
   return result;
 }
 
-export function mapContentIds(list, mapping = new Map()) {
+export function mapContentIds(list, mapping = new Map(), supplied) {
+  if (supplied !== undefined) object(supplied);
+  const mapEntry = entry => {
+    mapping.set(entry.id, supplied && Object.hasOwn(supplied, entry.id) ? id(supplied[entry.id]) : randomUUID());
+  };
   for (const entries of [list.sections, list.items, list.places ?? [], list.recipients ?? []]) {
-    for (const entry of entries) mapping.set(entry.id, randomUUID());
+    for (const entry of entries) mapEntry(entry);
   }
+  for (const item of list.items) for (const subitem of item.subitems ?? []) mapEntry(subitem);
   return mapping;
 }

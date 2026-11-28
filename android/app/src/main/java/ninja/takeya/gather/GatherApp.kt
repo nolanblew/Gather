@@ -85,8 +85,12 @@ data class Confirmation(
     val message: String,
     val label: String,
     val danger: Boolean = false,
+    val requiresConnection: Boolean = false,
     val action: () -> Unit,
 )
+
+private val GatherState.canImportBackup: Boolean
+    get() = workspaceReady && !busy && (connected || "offline-import" in capabilities)
 
 @Composable
 fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList()) {
@@ -225,7 +229,17 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                 else if (state.username == null) GatherReveal { AuthScreen(state, model) }
                 else
                     GatherReveal {
-                        val writable = state.connected && !state.busy
+                        val writable = state.canEditWorkspace && !state.busy
+                        val online = state.connected && !state.busy
+                        val changeCount = "${state.pendingChanges} ${if (state.pendingChanges == 1) "change" else "changes"}"
+                        val syncStatus = when {
+                            state.syncing && state.pendingChanges > 0 -> "Syncing $changeCount…"
+                            !state.connected && state.pendingChanges > 0 -> "Offline · $changeCount saved on this device"
+                            state.pendingChanges > 0 -> "$changeCount waiting to sync"
+                            !state.connected && state.canEditWorkspace -> "Offline · Changes save on this device"
+                            !state.connected -> "Offline · Connect to edit"
+                            else -> ""
+                        }
                         val pageTarget =
                             GatherPage(
                                 when {
@@ -276,7 +290,7 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                                             ),
                                     )
                                     AnimatedVisibility(
-                                        visible = !state.connected,
+                                        visible = syncStatus.isNotEmpty(),
                                         enter =
                                             expandVertically(
                                                 GatherMotion.standard(),
@@ -298,17 +312,19 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
                                             Icon(
-                                                Icons.Outlined.CloudOff,
+                                                if (state.connected) Icons.Outlined.Sync else Icons.Outlined.CloudOff,
                                                 null,
                                                 Modifier.size(18.dp),
                                             )
                                             Spacer(Modifier.width(10.dp))
                                             Text(
-                                                "No connection · Read-only",
+                                                syncStatus,
                                                 style = MaterialTheme.typography.labelMedium,
-                                                modifier = Modifier.weight(1f),
+                                                modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
                                             )
-                                            TextButton(onClick = model::refresh) { Text("Retry") }
+                                            if (!state.syncing) TextButton(onClick = model::refresh, enabled = !state.busy) {
+                                                Text(if (state.connected) "Sync now" else "Retry")
+                                            }
                                         }
                                     }
                                     Notice(state, model)
@@ -453,7 +469,7 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                                     }
                                 },
                                 confirmButton = {
-                                    Button(onClick = model::joinInvite, enabled = writable) {
+                                    Button(onClick = model::joinInvite, enabled = online) {
                                         Text(if (invite.alreadyMember) "Open list" else "Join list")
                                     }
                                 },
@@ -487,7 +503,7 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                                             model.importBackup(raw)
                                             importing = null
                                         },
-                                        enabled = writable,
+                                        enabled = state.canImportBackup,
                                     ) {
                                         Text("Import copies")
                                     }
@@ -508,7 +524,7 @@ fun GatherApp(model: GatherViewModel, folds: List<FoldingFeature> = emptyList())
                                             confirm = null
                                             c.action()
                                         },
-                                        enabled = writable,
+                                        enabled = if (c.requiresConnection) online else writable,
                                         colors =
                                             ButtonDefaults.textButtonColors(
                                                 contentColor =
@@ -644,7 +660,7 @@ fun LibraryScreen(state: GatherState, model: GatherViewModel, edit: (Editor) -> 
                                     options = false
                                     edit(Editor.CategoryForm())
                                 },
-                                enabled = state.connected && !state.busy,
+                                enabled = state.canEditWorkspace && !state.busy,
                             )
                             state.workspace.categories
                                 .sortedBy { it.position }
@@ -655,7 +671,7 @@ fun LibraryScreen(state: GatherState, model: GatherViewModel, edit: (Editor) -> 
                                             options = false
                                             edit(Editor.CategoryForm(cat))
                                         },
-                                        enabled = state.connected && !state.busy,
+                                        enabled = state.canEditWorkspace && !state.busy,
                                     )
                                 }
                         }
@@ -772,7 +788,7 @@ fun LibraryScreen(state: GatherState, model: GatherViewModel, edit: (Editor) -> 
                             payload("listId" to list.id, "favorite" to !list.favorite),
                         )
                     },
-                    enabled = state.connected && !state.busy,
+                    enabled = state.canEditWorkspace && !state.busy,
                     selected = state.selectedId == list.id,
                     modifier =
                         Modifier.animateItem(
@@ -1012,6 +1028,9 @@ fun ItemRow(
     dragHandle: (@Composable () -> Unit)? = null,
     reorderMenu: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
+    detailsExpanded: Boolean = false,
+    expandDetails: (() -> Unit)? = null,
+    expandedDetails: (@Composable () -> Unit)? = null,
 ) {
     val textColor by
         animateColorAsState(
@@ -1083,6 +1102,14 @@ fun ItemRow(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp),
                         )
+                    if (expandDetails != null && list.kind == "checklist" && item.subitems.isNotEmpty()) {
+                        Text(
+                            "${item.subitems.count { it.checked }} of ${item.subitems.size} steps done",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
                     if (detail.isNotBlank())
                         Text(
                             detail,
@@ -1102,6 +1129,12 @@ fun ItemRow(
                             modifier = Modifier.padding(top = 4.dp),
                         )
                 }
+                if (expandDetails != null) IconButton(onClick = expandDetails) {
+                    Icon(
+                        if (detailsExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        if (detailsExpanded) "Hide details for ${item.text}" else "Show details for ${item.text}",
+                    )
+                }
                 if (reorderMenu != null) reorderMenu()
                 else if (selected == null)
                     Icon(
@@ -1111,6 +1144,7 @@ fun ItemRow(
                         tint = MaterialTheme.colorScheme.outline,
                     )
             }
+            if (detailsExpanded && expandedDetails != null) expandedDetails()
             HorizontalDivider(
                 modifier = Modifier.padding(horizontal = 16.dp),
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (highlighted) 0f else .6f),
@@ -1160,12 +1194,13 @@ fun SettingsScreen(
                                     "Sign out?",
                                     "Lists stay safely on Gather. You’ll need your username and password to return.",
                                     "Sign out",
+                                    requiresConnection = true,
                                 ) {
                                     model.logout()
                                 }
                             )
                         },
-                        !state.busy,
+                        state.connected && !state.busy,
                     )
                 }
             }
@@ -1199,7 +1234,7 @@ fun SettingsScreen(
                         "Save the lists you own as JSON",
                         Icons.Outlined.FileUpload,
                         export,
-                        state.connected && !state.busy,
+                        state.workspaceReady && !state.busy,
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     SettingsRow(
@@ -1207,10 +1242,10 @@ fun SettingsScreen(
                         "Add private copies from a Gather file",
                         Icons.Outlined.FileDownload,
                         import,
-                        state.connected && !state.busy,
+                        state.canImportBackup,
                     )
                     Text(
-                        "Backups include owned lists, categories, notes, and checkmarks. Joined lists, accounts, and sharing access are excluded.",
+                        "Backups include your lists, categories, descriptions, images, and subchecklists.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1235,7 +1270,7 @@ fun SettingsScreen(
                                     }
                                 )
                             },
-                            state.connected && !state.busy,
+                            state.canEditWorkspace && !state.busy,
                         )
                     }
                 }

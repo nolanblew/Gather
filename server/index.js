@@ -2,17 +2,33 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createUserStore, InputError, WORKSPACE_BYTE_LIMIT, WORKSPACE_VERSION } from './store.mjs';
+import { createUserStore, InputError, validateWorkspace, WORKSPACE_BYTE_LIMIT, WORKSPACE_VERSION } from './store.mjs';
 import { createSearchService } from './search.mjs';
 import { createAuth } from './auth.mjs';
-import { readCoverUpload, coverGenerationEnabled, createCoverWorker } from './covers.mjs';
+import { coverCondition, coverOperation, prepareCover, readCoverUpload, coverGenerationEnabled, createCoverWorker } from './covers.mjs';
+import { itemDetailActions, prepareActionImages, prepareImportImages } from './item-details.mjs';
 
 const BODY_LIMIT = WORKSPACE_BYTE_LIMIT;
+const ACTION_BODY_LIMIT = BODY_LIMIT * 2 + 64 * 1024;
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.webmanifest': 'application/manifest+json' };
 async function body(req, limit = BODY_LIMIT) {
   const chunks = []; let size = 0;
-  for await (const chunk of req) { size += chunk.length; if (size > limit) throw new InputError(limit === BODY_LIMIT ? 'Request exceeds 5 MiB limit.' : 'Request exceeds 8 KiB limit.', 413); chunks.push(chunk); }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new InputError('Invalid JSON body.'); }
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) {
+      const label = limit === 8192 ? '8 KiB' : limit === BODY_LIMIT ? '5 MiB' : '10 MiB plus 64 KiB';
+      throw new InputError(`Request exceeds ${label} limit.`, 413);
+    }
+    chunks.push(chunk);
+  }
+  let value;
+  try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new InputError('Invalid JSON body.'); }
+  // A guarded detail edit can carry the full current and proposed descriptions.
+  if (size > BODY_LIMIT && value?.type !== 'workspace.import' && !(itemDetailActions.has(value?.type) &&
+      Array.isArray(value?.payload?.description) && Array.isArray(value?.payload?.expectedDescription))) {
+    throw new InputError('Request exceeds 5 MiB limit.', 413);
+  }
+  return value;
 }
 function checkOrigin(req) {
   if (req.headers['sec-fetch-site'] === 'cross-site') throw new InputError('Cross-site writes are not allowed.', 403);
@@ -50,7 +66,7 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
         }
         if (req.method === 'GET' && url.pathname === '/api/health') { store.health(); return json(200, { status: 'ok' }); }
         if (req.method === 'GET' && url.pathname === '/api/capabilities') {
-          const features = ['sharing', 'search', 'import', 'export', 'list-organization', 'numbered-lists', 'guarded-order', 'multiple-recipients', 'bulk-assignments', 'visible-item-order', 'group-order', 'list-covers'];
+          const features = ['sharing', 'search', 'import', 'export', 'list-organization', 'numbered-lists', 'guarded-order', 'multiple-recipients', 'bulk-assignments', 'visible-item-order', 'group-order', 'list-covers', 'item-descriptions', 'checklist-subitems', 'offline-actions', 'delete-done', 'offline-import'];
           if (coverGenerationEnabled(coverEnv)) features.push('generated-list-covers');
           return json(200, { apiVersion: 1, workspaceVersion: WORKSPACE_VERSION, authentication: ['cookie', 'bearer'], features });
         }
@@ -84,11 +100,19 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
           }
           if (req.method === 'PUT') {
             checkOrigin(req);
-            store.covers.checkAccess(actor.id, listId);
-            const image = await readCoverUpload(req);
+            const key = req.headers['idempotency-key'];
+            const expected = coverCondition(req.headers['if-match']);
+            if (key === undefined) store.covers.checkAccess(actor.id, listId);
+            const upload = await readCoverUpload(req);
             if (auth.current(req)?.id !== actor.id) throw new InputError('Authentication required.', 401);
-            store.covers.upload(actor.id, listId, image);
-            return json(200, store.get(actor.id));
+            const command = coverOperation(key, listId, expected, upload);
+            const replay = store.covers.replayUpload(actor.id, command);
+            if (replay) return json(200, { ...store.get(actor.id), ...replay });
+            if (key !== undefined) store.covers.checkAccess(actor.id, listId);
+            const image = await prepareCover(upload.bytes, upload.format);
+            if (auth.current(req)?.id !== actor.id) throw new InputError('Authentication required.', 401);
+            const receipt = store.covers.upload(actor.id, listId, image, { command, expected });
+            return json(200, { ...store.get(actor.id), ...receipt });
           }
           return json(405, { error: 'Method not allowed.' });
         }
@@ -106,7 +130,7 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
         if (req.method === 'GET' && url.pathname === '/api/search/status') return json(200, search.status());
         if (req.method === 'GET' && ['/api/workspace', '/api/export'].includes(url.pathname)) { if (url.pathname === '/api/export') res.setHeader('Content-Disposition', 'attachment; filename="gather-backup.json"'); return json(200, url.pathname === '/api/export' ? store.export(actor.id) : getWorkspace()); }
         if (req.method === 'POST' && ['/api/actions', '/api/import', '/api/search'].includes(url.pathname)) {
-          const input = await body(req, url.pathname === '/api/search' ? 8192 : BODY_LIMIT);
+          const input = await body(req, url.pathname === '/api/search' ? 8192 : url.pathname === '/api/actions' ? ACTION_BODY_LIMIT : BODY_LIMIT);
           if(auth.current(req)?.id!==actor.id) throw new InputError('Authentication required.',401);
           if (url.pathname === '/api/search') {
             if (!input || typeof input !== 'object' || Array.isArray(input)) throw new InputError('Expected a search object.');
@@ -117,7 +141,28 @@ export function createApp({ dataDir = process.env.DATA_DIR || resolve('data'), d
             if (categoryId !== null && (typeof categoryId !== 'string' || !getWorkspace().categories.some(c => c.id === categoryId))) throw new InputError('Search category not found.');
             return json(200, await search.search({ query, scope, categoryId, limit }, getWorkspace));
           }
-          return json(200, url.pathname === '/api/import' ? store.import(input,actor.id) : store.action(input,actor.id));
+          if (url.pathname === '/api/import') {
+            const { workspace } = await prepareImportImages(validateWorkspace(input));
+            if (auth.current(req)?.id !== actor.id) throw new InputError('Authentication required.', 401);
+            return json(200, store.import(workspace, actor.id));
+          }
+          if (input?.type === 'workspace.import') {
+            const replay = store.replay(input, actor.id);
+            if (replay) return json(200, replay);
+            const { workspace, resolvedImages } = await prepareImportImages(validateWorkspace(input.payload?.workspace));
+            if (auth.current(req)?.id !== actor.id) throw new InputError('Authentication required.', 401);
+            const prepared = { ...input, payload: { ...input.payload, workspace } };
+            return json(200, store.action(input, actor.id, { prepared, resolvedImages }));
+          }
+          if (itemDetailActions.has(input?.type) && input.payload && Object.hasOwn(input.payload, 'description')) {
+            const replay = store.replay(input, actor.id);
+            if (replay) return json(200, replay);
+            store.checkAccess(actor.id, input.payload.listId);
+            const details = await prepareActionImages(input);
+            if (auth.current(req)?.id !== actor.id) throw new InputError('Authentication required.', 401);
+            return json(200, store.action(input, actor.id, details));
+          }
+          return json(200, store.action(input, actor.id));
         }
         return json(404, { error: 'API route not found.' });
       }

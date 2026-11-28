@@ -169,7 +169,7 @@ export function createAuth({ dataDir, env = process.env } = {}) {
     const tokenHash=digestToken(token),row=session.get(tokenHash);
     if(!row || row.transport!==(bearer ? 'bearer' : 'cookie')) return null;
     if(row.expires_at<=Date.now()) { removeSession.run(tokenHash); return null; }
-    return {id:row.user_id,username:row.username,tokenHash};
+    return {id:row.user_id,username:row.username,tokenHash,expiresAt:row.expires_at};
   }
   async function register(input,req,transport='cookie') {
     inputObject(input);
@@ -222,7 +222,13 @@ export function createAuth({ dataDir, env = process.env } = {}) {
   }
   return {
     legacyOwnerId,
-    session:(req,transport='cookie')=> { const user=current(req,transport); return user ? response(user) : {authenticated:false,setupRequired:false}; },
+    session:(req,transport='cookie')=> {
+      const user=current(req,transport);
+      if (!user) return {authenticated:false,setupRequired:false};
+      const result = response(user);
+      if (transport === 'bearer') result.expiresAt = new Date(user.expiresAt).toISOString();
+      return result;
+    },
     current,
     username:userId=>getUserId.get(userId)?.username || 'Gather user',
     register,login,

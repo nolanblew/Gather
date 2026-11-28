@@ -142,7 +142,7 @@ fun DefinitionsForm(
     var options by rememberEditorDraft("definition-options") { false }
     val place = list.places.find { it.id == editingId }
     val person = list.recipients.find { it.id == editingId }
-    val writable = state.connected && !state.busy
+    val writable = state.canEditWorkspace && !state.busy
     if (editingType.isEmpty()) {
         SheetHeader("Places and people")
         if (list.places.isNotEmpty()) {

@@ -461,6 +461,7 @@ internal fun GatherWorkspaceScaffold(
                         Spacer(Modifier.height(12.dp))
                         Button(
                             onClick = onNewList,
+                            enabled = state.canEditWorkspace && !state.busy,
                             modifier =
                                 Modifier.fillMaxWidth().testTag("new-list").semantics {
                                     contentDescription = "New list"
@@ -496,6 +497,7 @@ internal fun GatherWorkspaceScaffold(
                     ) {
                         FilledTonalButton(
                             onClick = onNewList,
+                            enabled = state.canEditWorkspace && !state.busy,
                             modifier =
                                 Modifier.padding(horizontal = 6.dp)
                                     .fillMaxWidth()
@@ -553,7 +555,7 @@ internal fun GatherWorkspaceScaffold(
                 if (
                     !settings &&
                         state.selected == null &&
-                        window.navigation == GatherNavigation.Bottom
+                        window.navigation == GatherNavigation.Bottom && state.canEditWorkspace && !state.busy
                 ) {
                     ExtendedFloatingActionButton(
                         onClick = onNewList,

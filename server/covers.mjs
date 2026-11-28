@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import sharp from 'sharp';
-import { InputError } from './input.mjs';
+import { InputError, id } from './input.mjs';
 
 export const COVER_LIMIT = 2 * 1024 * 1024;
 export const COVER_DELAY = 30_000;
@@ -19,10 +19,27 @@ export async function readCoverUpload(req) {
     if (size > COVER_LIMIT) throw tooLarge();
     chunks.push(chunk);
   }
-  return prepareCover(Buffer.concat(chunks), formats.get(type));
+  return { bytes: Buffer.concat(chunks), format: formats.get(type) };
 }
 
-async function prepareCover(bytes, format) {
+export function coverCondition(value) {
+  if (value === undefined) return;
+  const hash = value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
+  if (hash === 'none') return null;
+  if (!/^[0-9a-f]{64}$/.test(hash)) throw new InputError('Expected a cover ID or none.');
+  return hash;
+}
+
+export function coverOperation(key, listId, expected, { bytes, format }) {
+  if (key === undefined) return null;
+  return {
+    id: id(key),
+    fingerprint: createHash('sha256').update(JSON.stringify(['cover.upload', listId, expected, format]))
+      .update(expected === undefined ? 'unconditional' : 'conditional').update(bytes).digest('hex'),
+  };
+}
+
+export async function prepareCover(bytes, format) {
   try {
     const image = sharp(bytes, { limitInputPixels: 16_000_000, failOn: 'warning' });
     const metadata = await image.metadata();
@@ -38,7 +55,7 @@ async function prepareCover(bytes, format) {
   }
 }
 
-export function createCoverStore(db, { access, raw, transaction }) {
+export function createCoverStore(db, { access, raw, transaction, replayReceipt, recordReceipt }) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS list_covers (
       list_id TEXT PRIMARY KEY REFERENCES list_owners(list_id) ON DELETE CASCADE,
@@ -58,8 +75,10 @@ export function createCoverStore(db, { access, raw, transaction }) {
   const write = db.prepare(`INSERT INTO list_covers VALUES(?,?,?)
     ON CONFLICT(list_id) DO UPDATE SET hash=excluded.hash,image=excluded.image`);
   function save(listId, bytes) {
-    write.run(listId, createHash('sha256').update(bytes).digest('hex'), bytes);
+    const coverId = createHash('sha256').update(bytes).digest('hex');
+    write.run(listId, coverId, bytes);
     dropJob.run(listId);
+    return coverId;
   }
   return {
     id: listId => hash.get(listId)?.hash,
@@ -70,8 +89,22 @@ export function createCoverStore(db, { access, raw, transaction }) {
       if (!row) throw new InputError('No cover for this list yet.', 404);
       return row.image;
     },
-    upload(userId, listId, bytes) {
-      transaction(() => { access(userId, listId); save(listId, bytes); });
+    replayUpload(userId, command) { return replayReceipt(userId, command); },
+    upload(userId, listId, bytes, { command, expected } = {}) {
+      return transaction(() => {
+        const replay = replayReceipt(userId, command);
+        if (replay) return replay;
+        access(userId, listId);
+        if (expected !== undefined && expected !== (hash.get(listId)?.hash ?? null)) {
+          throw new InputError('The cover changed. Review the list and try again.', 409, 'COVER_CHANGED');
+        }
+        const resolvedCoverId = save(listId, bytes);
+        if (command) {
+          const receipt = { resolvedCoverId };
+          recordReceipt(userId, command, receipt);
+          return receipt;
+        }
+      });
     },
     onCreate(listId, sourceId, generate) {
       if (sourceId) db.prepare('INSERT INTO list_covers SELECT ?,hash,image FROM list_covers WHERE list_id=?').run(listId, sourceId);

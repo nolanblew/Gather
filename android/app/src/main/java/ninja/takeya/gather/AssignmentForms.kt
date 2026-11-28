@@ -106,7 +106,7 @@ internal fun BulkAddForm(editor: Editor.BulkAdd, state: GatherState, model: Gath
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = dismiss, enabled = !state.busy, modifier = Modifier.weight(1f)) { Text("Cancel") }
         Button(
-            enabled = state.connected && !state.busy && selected.isNotEmpty() &&
+            enabled = state.canEditWorkspace && !state.busy && selected.isNotEmpty() &&
                 (ids.isNotEmpty() || names.isNotEmpty()) && !missing && !overLimit,
             modifier = Modifier.weight(1.5f),
             onClick = {

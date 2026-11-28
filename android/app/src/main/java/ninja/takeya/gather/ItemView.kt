@@ -98,7 +98,7 @@ fun GatherList.viewItems(sort: ItemSort, filter: ListFilter, query: String = "")
 
 fun GatherList.matchesItemQuery(item: ListItem, query: String): Boolean {
     val search = query.trim()
-    return search.isEmpty() || listOf(item.text, item.note, item.quantity, itemMetadata(item, ListFilter()))
+    return search.isEmpty() || (listOf(item.text, item.descriptionText, item.quantity, itemMetadata(item, ListFilter())) + item.subitems.map { it.text })
         .any { it.contains(search, ignoreCase = true) }
 }
 

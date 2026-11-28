@@ -14,7 +14,7 @@ Administrators can set `GATHER_COVER_GENERATION=false` to use uploads alone. `GA
 
 ## Optional organization
 
-Use **Add detail** to add a description, quantity, section, alternative places, or the people an item is for. **Select items** lets you add people or places to several items together. Places and people belong to the list.
+Open an item to format its description, link to a Gather list or website, and insert or attach an image. Add a subchecklist to track steps independently of the parent item. The row shows how many steps are complete. **Add detail** also offers quantities, sections, places, and people. **Select items** lets you add people or places to several items together. Places and people belong to the list.
 
 Ordinary lists open in date-added order. Use **View** to filter items, group them by place or person, or change the sort. A shared item appears in each applicable group. Checking it off updates every appearance. Manual reordering moves it within its section, including when viewing a filtered group. To put stops or people in trip order, group the list by place or person, enter reorder mode from the list menu, then choose **Reorder groups**. Drag a group by its handle or use its move buttons. Everyone on the list sees the saved order. **Reset order** restores the default for that grouping. **Number items** displays the shared item sequence.
 
@@ -22,9 +22,9 @@ These features use workspace version 4. Update the server before clients. Existi
 
 ## Native Android app
 
-The native Kotlin/Jetpack Compose app in [`android/`](android/README.md) supports **Android 14 and newer**. Its signed release uses **https://gather.takeya.ninja/** and shares accounts, lists, templates, search, invitations, and backups with the web client. It includes Paper, Cloud, Forest, Midnight and System appearance, native sharing and text capture, animated progress, and Android file pickers for JSON backups.
+The native Kotlin/Jetpack Compose app in [`android/`](android/README.md) supports **Android 14 and newer**. Its signed release uses **https://gather.takeya.ninja/** and shares accounts, lists, templates, search, invitations, and backups with the web client. It includes Paper, Cloud, Forest, Midnight and System appearance, native sharing and text capture, animated progress, and Android file pickers for JSON backups. Android keeps a signed-in workspace on the device and queues supported data edits while offline; queued edits sync automatically when connectivity returns. Backups also work offline. Sign-in, account security, and sharing changes need a connection.
 
-Both clients use the documented [shared API](docs/API.md). Web sessions use HttpOnly cookies; Android uses separately scoped bearer sessions encrypted with Android Keystore. An internet connection is required for changes; a current in-memory view remains read-only during connection loss.
+Both clients use the documented [shared API](docs/API.md). Web sessions use HttpOnly cookies; Android uses separately scoped bearer sessions encrypted with Android Keystore. Web changes require a connection.
 
 See [Android build, signing and local testing](android/README.md), [independent review](docs/ANDROID-REVIEW.md), and [asset provenance](docs/ANDROID-ASSETS.md). Keep the release signing key outside the repository and retain it for future app updates.
 
@@ -112,7 +112,7 @@ The Node server serves the built app and API together at http://localhost:3000. 
 - Use favorites, categories, and search to find a list. Search includes items, notes, quantities, sections, and categories; typo and meaning matches show stored evidence.
 - Item details hold quantity and notes. Sections and accessible ordering controls keep bigger lists organized.
 - Templates are separate master lists. Starting one makes a dated copy with all items unchecked; the master stays intact.
-- Templates carry their list kind and Manual/Daily/Weekly repeat label. An active checklist with checked items has a confirmed Start again action. Repeat labels never schedule automatic resets.
+- Templates carry their list kind and Manual/Daily/Weekly repeat label. On an active checklist, **Start again** clears checkmarks. **List actions → Delete done** permanently removes checked items and their steps after confirmation, including items hidden by filters. Repeat labels never schedule automatic resets.
 - Archive keeps lists recoverable. Permanent deletion and workspace restore require confirmation.
 - Settings provides JSON export and **Import backup copy**. Import adds private copies after validation and leaves existing lists and sharing unchanged.
 
@@ -124,7 +124,7 @@ For infrastructure backups, stop the container before copying its SQLite databas
 
 ## Technical design
 
-React + TypeScript + Vite; Node's HTTP server and built-in SQLite; one production container with a persistent volume. Granular commands mutate server-authoritative data in transactions, with account and membership checks on every request. Polling and focus refresh keep collaborators current. A network connection is required; there is no offline synchronization or live-cursor collaboration.
+React + TypeScript + Vite; Node's HTTP server and built-in SQLite; one production container with a persistent volume. Granular commands mutate server-authoritative data in transactions, with account and membership checks on every request. Polling and focus refresh keep collaborators current. The web client saves changes online. Android persists list edits locally and syncs them with the server when connected.
 
 - [Product requirements](docs/PRD.md)
 - [UX and prototype ratings](docs/UX.md)

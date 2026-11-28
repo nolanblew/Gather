@@ -14,6 +14,34 @@ data class Category(
 @Serializable data class Section(val id: String, val title: String, val position: Int = 0)
 
 @Serializable
+data class Subitem(val id: String, val text: String, val checked: Boolean = false)
+
+@Serializable
+data class DescriptionLink(val type: String, val listId: String? = null, val url: String? = null)
+
+@Serializable
+data class DescriptionRun(
+    val text: String,
+    val bold: Boolean = false,
+    val italic: Boolean = false,
+    val underline: Boolean = false,
+    val strike: Boolean = false,
+    val link: DescriptionLink? = null,
+)
+
+@Serializable
+data class DescriptionBlock(
+    val type: String = "paragraph",
+    val runs: List<DescriptionRun> = emptyList(),
+    val checked: Boolean = false,
+    val dataUrl: String? = null,
+    val alt: String? = null,
+    val display: String? = null,
+) {
+    val text: String get() = runs.joinToString("") { it.text }
+}
+
+@Serializable
 data class ListItem(
     val id: String,
     val text: String,
@@ -25,9 +53,15 @@ data class ListItem(
     val availability: Availability = Availability(),
     val recipientId: String? = null,
     val recipientIds: List<String> = emptyList(),
+    val description: List<DescriptionBlock> = emptyList(),
+    val subitems: List<Subitem> = emptyList(),
 ) {
     val peopleIds: List<String>
         get() = recipientIds.ifEmpty { listOfNotNull(recipientId) }
+
+    val descriptionText: String
+        get() = description.joinToString("\n") { if (it.type == "image") it.alt.orEmpty() else it.text }
+            .takeIf { description.isNotEmpty() } ?: note
 }
 
 @Serializable
@@ -75,6 +109,10 @@ data class Workspace(
     val createdListId: String? = null,
     val joinedListId: String? = null,
     val createdItemId: String? = null,
+    val resolvedIds: Map<String, String> = emptyMap(),
+    val resolvedImages: Map<String, String> = emptyMap(),
+    val resolvedCoverId: String? = null,
+    val createdSubitemId: String? = null,
 )
 
 @Serializable
@@ -83,6 +121,7 @@ data class Session(
     val userId: String? = null,
     val username: String? = null,
     val accessToken: String? = null,
+    val expiresAt: String? = null,
 )
 
 @Serializable

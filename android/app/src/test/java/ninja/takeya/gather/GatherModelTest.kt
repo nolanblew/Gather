@@ -1,10 +1,44 @@
 package ninja.takeya.gather
 
+import androidx.compose.ui.text.TextRange
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
 class GatherModelTest {
+    @Test
+    fun descriptionEditsKeepFormattingOutsideTheReplacement() {
+        val link = DescriptionLink("external", url = "https://example.com")
+        val block = DescriptionBlock(runs = listOf(DescriptionRun("Bring", bold = true), DescriptionRun(" tea", link = link)))
+        val edited = block.applyTextEdit("Bring hot tea", TextRange(6), DescriptionRun("", italic = true))
+        assertEquals("Bring hot tea", edited.text)
+        assertEquals(listOf(
+            DescriptionRun("Bring", bold = true),
+            DescriptionRun(" ", link = link),
+            DescriptionRun("hot ", italic = true),
+            DescriptionRun("tea", link = link),
+        ), edited.runs)
+        val marked = edited.runs.styleRange(TextRange(9, 6)) { it.copy(underline = true, strike = true) }
+        assertEquals(DescriptionRun("hot", italic = true, underline = true, strike = true), marked[2])
+        assertEquals(link, marked.last().link)
+        val repeated = DescriptionBlock(runs = listOf(DescriptionRun("a", bold = true), DescriptionRun("a", italic = true), DescriptionRun("aa")))
+        val deleted = repeated.applyTextEdit("aaa", TextRange(2), null, TextRange(1))
+        assertEquals(listOf(DescriptionRun("a", bold = true), DescriptionRun("aa")), deleted.runs)
+    }
+
+    @Test
+    fun descriptionWritesKeepLegacyPlainNotesAndPreserveRichCheckboxes() {
+        val item = ListItem("item", "Tea", note = "Green tea.\n\nSmall tin.")
+        assertEquals(DescriptionWrite(item.note, emptyList()), item.descriptionDraft().descriptionWrite())
+        val check = DescriptionBlock("checkbox", listOf(DescriptionRun("Tea\nOther tea", bold = true)), checked = true)
+        val lines = check.splitListLines()
+        assertEquals(listOf("Tea", "Other tea"), lines.map { it.text })
+        assertEquals(listOf(true, false), lines.map { it.checked })
+        assertTrue(lines.all { it.runs.single().bold })
+        assertEquals(JsonPrimitive(false), lines.last().toPayload()["checked"])
+        assertEquals(DescriptionWrite("", lines), lines.map { DescriptionEntry(it) }.descriptionWrite())
+    }
+
     @Test
     fun authoritativeWorkspaceRemovesDanglingPersonalCategoryAndAccessState() {
         val previous =

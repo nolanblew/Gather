@@ -37,6 +37,7 @@ test('native sessions are explicit, hashed, durable, and isolated from browser c
   const headers = { Authorization: `Bearer ${native.value.accessToken}` };
   const session = await f.ok('/api/native/auth/session', undefined, headers);
   assert.equal(session.userId, native.value.userId);
+  assert.equal(session.expiresAt, native.value.expiresAt);
   assert.equal(session.accessToken, undefined);
   const browser = await f.request('/api/auth/login', { username: 'Alice', password });
   const browserCookie = cookie(browser.response);

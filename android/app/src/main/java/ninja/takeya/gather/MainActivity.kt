@@ -1,10 +1,13 @@
 package ninja.takeya.gather
 
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.core.view.WindowCompat
@@ -19,7 +22,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
-    private val model: GatherViewModel by viewModels()
+    private val model get() = (application as GatherApplication).gatherModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,10 +41,22 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                model.refresh()
-                while (true) {
-                    delay(30000)
+                val connectivity = getSystemService(ConnectivityManager::class.java)
+                val reconnect = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) { model.refresh() }
+                    override fun onLost(network: Network) {
+                        if (connectivity.activeNetwork == null) model.refresh()
+                    }
+                }
+                connectivity.registerDefaultNetworkCallback(reconnect, Handler(Looper.getMainLooper()))
+                try {
                     model.refresh()
+                    while (true) {
+                        delay(30000)
+                        model.refresh()
+                    }
+                } finally {
+                    connectivity.unregisterNetworkCallback(reconnect)
                 }
             }
         }

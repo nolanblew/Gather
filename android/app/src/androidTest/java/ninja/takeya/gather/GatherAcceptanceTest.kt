@@ -74,6 +74,53 @@ class GatherAcceptanceTest {
         }
     }
 
+    @Test fun richDescriptionAndSubchecklistPersistIndependentlyOfItemCompletion() {
+        val fixture = LocalAcceptanceFixture()
+        val title = "Item details ${fixture.runId}"
+        val item = "Pack the basket"
+        val description = "Lunch for four"
+        val step = "Pack the napkins"
+        val listId = fixture.action("list.create", json("title" to title)).getString("createdListId")
+        fixture.action("item.create", json("listId" to listId, "text" to item))
+        signIn(fixture)
+
+        scrollText(title)
+        click(title)
+        scrollText(item)
+        click(item)
+        compose.onNodeWithText("Add description").performScrollTo().performClick()
+        val body = compose.onNodeWithTag("field-Description")
+        body.performScrollTo().performClick()
+        compose.onNodeWithContentDescription("Bold").performScrollTo().performClick()
+        body.performTextInput(description)
+        closeSoftKeyboard()
+
+        compose.onNodeWithText("Add step").performScrollTo().performClick()
+        compose.onNodeWithTag("field-Step").performTextInput(step)
+        compose.onNodeWithContentDescription("Save step").performScrollTo().performClick()
+        closeSoftKeyboard()
+        compose.onNodeWithTag("editor-save").assertIsDisplayed()
+        compose.onNodeWithText("Unsaved edits").assertIsDisplayed()
+        saveEditor()
+        awaitStored("rich description and subchecklist") {
+            val stored = fixture.item(title, item)
+            val run = stored?.optJSONArray("description")?.optJSONObject(0)?.optJSONArray("runs")?.optJSONObject(0)
+            val storedStep = stored?.optJSONArray("subitems")?.optJSONObject(0)
+            run?.optString("text") == description && run.optBoolean("bold") &&
+                storedStep?.optString("text") == step && !storedStep.optBoolean("checked")
+        }
+
+        scrollDescription("Show details for $item")
+        clickDescription("Show details for $item")
+        scrollDescription("Check step $step")
+        clickDescription("Check step $step")
+        awaitStored("independent subchecklist completion") {
+            val stored = fixture.item(title, item)
+            stored?.optJSONArray("subitems")?.optJSONObject(0)?.optBoolean("checked") == true &&
+                !stored.optBoolean("checked")
+        }
+    }
+
     @Test fun realAppListsSharingSearchTemplatesArchiveAndAppearance() {
         val fixture = LocalAcceptanceFixture()
         signIn(fixture)
@@ -356,7 +403,7 @@ class GatherAcceptanceTest {
             compose.activityRule.scenario.recreate()
             compose.waitUntil(20_000) { file.exists() && retained.state.value.message == "Backup saved." }
             val backup = JSONObject(file.readText())
-            assertEquals(2, backup.getInt("version"))
+            assertEquals(created.getInt("version"), backup.getInt("version"))
             val lists = backup.getJSONArray("lists")
             val saved = (0 until lists.length()).map { lists.getJSONObject(it) }.single { it.getString("id") == listId }
             assertEquals(title, saved.getString("title"))
@@ -870,13 +917,14 @@ class GatherAcceptanceTest {
         waitTag("editor-item-text")
         compose.onAllNodesWithText("Quantity").assertCountEquals(0)
         compose.onAllNodesWithText("Places").assertCountEquals(0)
+        clickDescription("Item options")
         click("Add detail")
         captureOrganizationScreenshot("organization-add-detail")
         click("Place")
         editorText("field-Search places", "Cancelled draft")
         click("Create “Cancelled draft”")
         click("Done")
-        click("Cancel")
+        clickDescription("Cancel")
         assertFalse(fixture.list(title)?.optJSONArray("places").toString().contains("Cancelled draft"))
 
         scrollText("1. Tea")
@@ -885,6 +933,7 @@ class GatherAcceptanceTest {
         val description = "Green tea.\n\nLook for a small tin."
         editorText("field-Description", description)
         closeSoftKeyboard()
+        clickDescription("Item options")
         click("Add detail")
         click("Place")
         editorText("field-Search places", "Kyoto")
@@ -892,6 +941,7 @@ class GatherAcceptanceTest {
         editorText("field-Search places", "Tokyo")
         click("Create “Tokyo”")
         click("Done")
+        clickDescription("Item options")
         click("Add detail")
         click("For someone")
         editorText("field-Search people", "Maya")
@@ -913,7 +963,7 @@ class GatherAcceptanceTest {
         click("1. Tea")
         waitTag("field-Description")
         compose.onNodeWithTag("field-Description").assertTextContains(description)
-        click("Cancel")
+        clickDescription("Cancel")
 
         val stored = checkNotNull(fixture.list(title))
         val listId = stored.getString("id")
@@ -1087,7 +1137,8 @@ class GatherAcceptanceTest {
 
     private fun viewModel(key: String? = null): GatherViewModel = compose.runOnIdle {
         val provider = ViewModelProvider(compose.activity)
-        if (key == null) provider[GatherViewModel::class.java] else provider.get(key, GatherViewModel::class.java)
+        if (key == null) (compose.activity.application as GatherApplication).gatherModel
+        else provider.get(key, GatherViewModel::class.java)
     }
 
     private fun signIn(fixture: LocalAcceptanceFixture) {
@@ -1117,7 +1168,10 @@ class GatherAcceptanceTest {
     private fun saveEditor() {
         val submit = hasTestTag("editor-save")
         compose.waitUntil(10_000) { compose.onAllNodes(submit).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNode(submit).performScrollTo().performClick()
+        val button = compose.onNode(submit)
+        if (compose.onAllNodesWithTag("editor-item-text").fetchSemanticsNodes().isNotEmpty()) {
+            button.assertIsDisplayed().performClick()
+        } else button.performScrollTo().performClick()
         compose.waitUntil(20_000) { compose.onAllNodes(submit).fetchSemanticsNodes().isEmpty() }
     }
     private fun waitText(text: String) { compose.waitUntil(20_000) { compose.onAllNodesWithText(text, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() } }

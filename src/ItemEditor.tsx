@@ -1,13 +1,16 @@
-import { useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, ChevronDown, Copy, Plus, Trash2, UserRound, X } from 'lucide-react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { ArrowDown, ArrowLeft, ArrowUp, ChevronDown, CloudOff, Copy, MoreVertical, Plus, RefreshCw, Trash2, UserRound, X } from 'lucide-react';
 import Dialog from './Dialog';
+import { descriptionError, legacyDescription, sameDescription, sameSubitems } from './itemDetails';
 import { detailChoices, emptyPlaceFields, PickerBack, PlaceInputs } from './OrganizationDetails';
+import RichDescriptionEditor from './RichDescriptionEditor';
+import { newSubitemId, SubchecklistEditor } from './Subchecklist';
 import { byPosition, visibleItemOrder } from './itemOrder';
 import { filterOptions, itemRecipientIds, nameKey, noAvailability, normalizeName, orderGuard, placeLabel, sameAvailability, usedFirst } from './organization';
-import type { Availability, GatherList, Item, Mutation, Payload, PlaceFields, Workspace } from './types';
+import type { Availability, DescriptionBlock, GatherList, Item, Mutation, Payload, PlaceFields, Subitem, Workspace } from './types';
 
 type Detail = keyof typeof detailChoices;
-type Surface = 'item' | 'details' | 'place' | 'person' | 'delete';
+type Surface = 'item' | 'details' | 'metadata' | 'actions' | 'place' | 'person' | 'delete';
 type NewPlace = { name: string } & Partial<PlaceFields>;
 interface PlaceDraft { availability: Availability; newPlaces: NewPlace[] }
 interface PersonDraft { ids: string[]; newPeople: { name: string }[] }
@@ -18,10 +21,13 @@ export function makeItemDraft(overrides: Partial<Item> = {}): Item {
   return { id: '', text: '', quantity: '', note: '', sectionId: null, position: 0, checked: false, ...overrides };
 }
 
-export default function ItemEditor({ list, initial, organization, filtered, busy, error, clearError, mutate, saved, close, showFullOrder, useManualOrder }: {
+export default function ItemEditor({ list, initial, organization, richDescriptions, subchecklists, lists, filtered, busy, error, clearError, mutate, saved, close, showFullOrder, useManualOrder }: {
   list: GatherList;
   initial: Item;
   organization: boolean;
+  richDescriptions: boolean;
+  subchecklists: boolean;
+  lists: Pick<GatherList, 'id' | 'title'>[];
   filtered: boolean;
   busy: boolean;
   error: string;
@@ -37,28 +43,52 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
   const [place, setPlace] = useState<PlaceDraft>({ availability: initial.availability || noAvailability, newPlaces: [] });
   const [person, setPerson] = useState<PersonDraft>({ ids: itemRecipientIds(initial), newPeople: [] });
   const [surface, setSurface] = useState<Surface>('item');
-  const [hasDescription, setHasDescription] = useState(Boolean(initial.note));
+  const [hasDescription, setHasDescription] = useState(Boolean(initial.note || initial.description?.length));
+  const [initialDescription] = useState(() => initial.description ?? legacyDescription(initial.note));
+  const [description, setDescription] = useState(initialDescription);
+  const [preparingImage, setPreparingImage] = useState(false);
+  const [subitems, setSubitems] = useState(initial.subitems ?? []);
+  const [hasSubchecklist, setHasSubchecklist] = useState(Boolean(initial.subitems?.length));
   const [hasQuantity, setHasQuantity] = useState(Boolean(initial.quantity));
   const [hasSection, setHasSection] = useState(Boolean(initial.sectionId));
   const [orderSnapshot, setOrderSnapshot] = useState(list.orderToken);
   const [validation, setValidation] = useState('');
   const [startedForSomeone, setStartedForSomeone] = useState(false);
+  const [online, setOnline] = useState(() => navigator.onLine);
+  const formId = useId();
   const form = useRef<HTMLFormElement>(null);
   const input = useRef<HTMLInputElement>(null);
+  const options = useRef<HTMLDetailsElement>(null);
   const returnFocus = useRef('add-detail');
+  const compact = richDescriptions || subchecklists;
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => {
+      window.removeEventListener('online', update);
+      window.removeEventListener('offline', update);
+    };
+  }, []);
   const [recommended] = useState(() => {
     const options = filterOptions(list);
     return [options.places.size || options.anywhere ? 'place' : null, options.people.size ? 'person' : null].filter(Boolean) as Detail[];
   });
   const used = filterOptions(list);
   const current = draft.id ? list.items.find(item => item.id === draft.id) : undefined;
+  const currentDescription = current?.description ?? legacyDescription(current?.note ?? '');
   const currentPlace = current?.availability || noAvailability;
   const currentPersonIds = current ? itemRecipientIds(current) : [];
   const changingPlace = !sameAvailability(place.availability, initial.availability || noAvailability) || place.newPlaces.length > 0;
   const changingPerson = !samePeople(person.ids, itemRecipientIds(initial)) || person.newPeople.length > 0;
+  const changingDescription = richDescriptions && !sameDescription(description, initialDescription);
+  const changingSubitems = subchecklists && !sameSubitems(subitems, initial.subitems);
   const placeConflict = changingPlace && current && !sameAvailability(source.availability || noAvailability, currentPlace) && (place.newPlaces.length > 0 || !sameAvailability(place.availability, currentPlace));
   const personConflict = changingPerson && current && !samePeople(itemRecipientIds(source), currentPersonIds)
     && (person.newPeople.length > 0 || !samePeople(person.ids, currentPersonIds));
+  const descriptionConflict = changingDescription && current && (source.note !== current.note || !sameDescription(source.description, current.description))
+    && !sameDescription(description, currentDescription);
+  const subitemsConflict = changingSubitems && current && !sameSubitems(source.subitems, current.subitems) && !sameSubitems(subitems, current.subitems);
   const originalPlaces = list.places || [];
   const originalPeople = list.recipients || [];
   const currentPlaces = new Map(originalPlaces.map(place => [place.id, place]));
@@ -73,10 +103,14 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
   const orderChanged = (!draft.id || sectionChanged) && Boolean(list.numbered && orderSnapshot !== list.orderToken);
   const hasPlace = place.availability.mode !== 'unassigned';
   const hasPerson = person.ids.length > 0 || person.newPeople.length > 0;
+  const hasMetadata = hasPlace || hasPerson || hasQuantity || hasSection;
   const choiceOrder = [...new Set<Detail>([...recommended, 'description', 'place', 'person', 'quantity', 'section'])];
   const present: Record<Detail, boolean> = { description: hasDescription, place: hasPlace, person: hasPerson, quantity: hasQuantity, section: hasSection };
   const choices = choiceOrder.filter(key => !present[key] && (organization || (key !== 'place' && key !== 'person')));
-  const blocked = Boolean((!draft.id || changingPlace) && missingPlaces.length || (!draft.id || changingPerson) && missingPeople.length || (!draft.id || sectionChanged) && missingSection || placeConflict || personConflict || orderChanged);
+  const blocked = Boolean((!draft.id || changingPlace) && missingPlaces.length || (!draft.id || changingPerson) && missingPeople.length || (!draft.id || sectionChanged) && missingSection || placeConflict || personConflict || descriptionConflict || subitemsConflict || orderChanged || preparingImage);
+  const dirty = (['text', 'note', 'quantity', 'sectionId'] as const).some(key => draft[key] !== initial[key])
+    || changingDescription || changingSubitems || changingPlace || changingPerson;
+  const status = busy ? 'Saving…' : !online ? 'Offline' : dirty ? 'Unsaved changes' : draft.id ? 'Synced' : '';
 
   const select = (key: Detail) => {
     setValidation('');
@@ -84,12 +118,19 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
     if (key === 'description') setHasDescription(true);
     if (key === 'quantity') setHasQuantity(true);
     if (key === 'section') setHasSection(true);
-    showItem(key);
+    if (compact && (key === 'quantity' || key === 'section')) showForm('metadata', key);
+    else showForm('item', key);
   };
-  function showItem(focus = returnFocus.current) {
-    setSurface('item');
-    requestAnimationFrame(() => (form.current?.querySelector<HTMLElement>(`[data-detail="${focus}"]`) || form.current?.querySelector<HTMLElement>('[data-detail="add-detail"]') || input.current)?.focus());
+  function showForm(next: 'item' | 'metadata', focus = returnFocus.current) {
+    setSurface(next);
+    requestAnimationFrame(() => {
+      const target = form.current?.querySelector<HTMLElement>(`[data-detail="${focus}"]`)
+        || options.current?.querySelector<HTMLElement>('summary') || form.current?.querySelector<HTMLElement>('[data-detail="add-detail"]')
+        || input.current || form.current?.querySelector<HTMLElement>('input:enabled,select:enabled,button:enabled');
+      target?.focus();
+    });
   }
+  const showItem = (focus?: string) => showForm('item', focus);
   const closeSurface = () => { if (surface === 'item') close(); else showItem(); };
   const placeName = (id: string) => {
     const entry = currentPlaces.get(id) || knownPlaces.get(id);
@@ -101,12 +142,22 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
     setDraft({ ...draft, [key]: value });
     setValidation('');
   };
+  const changeDescription = (value: DescriptionBlock[]) => { setDescription(value); setValidation(''); };
+  const changeSubitems = (value: Subitem[]) => { setSubitems(value); setValidation(''); };
 
   const submit = async () => {
     if (!draft.text.trim()) { setValidation('Enter an item.'); input.current?.focus(); return; }
     if (draft.id && !current) { setValidation('This item is no longer available.'); return; }
     if (blocked) return;
     if (startedForSomeone && !hasPerson) { setSurface('person'); return; }
+    const invalidDescription = richDescriptions ? descriptionError(description) : '';
+    if (invalidDescription) { setValidation(invalidDescription); return; }
+    const emptyStep = subchecklists && subitems.find(step => !step.text.trim());
+    if (emptyStep) {
+      setValidation('Enter a name for each step or remove it.');
+      form.current?.querySelector<HTMLInputElement>(`[data-step-id="${CSS.escape(emptyStep.id)}"]`)?.focus();
+      return;
+    }
     const payload: Payload = { listId: list.id };
     if (draft.id) {
       payload.itemId = draft.id;
@@ -120,8 +171,25 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
         payload.expectedRecipientIds = itemRecipientIds(source);
         payload.recipientIds = person.ids;
       }
+      if (changingDescription && !sameDescription(description, currentDescription)) {
+        payload.description = description;
+        payload.expectedDescription = source.description ?? [];
+        if (current?.note) {
+          payload.note = '';
+          payload.expectedNote = source.note;
+        }
+      }
+      if (changingSubitems && !sameSubitems(subitems, current?.subitems)) {
+        payload.subitems = subitems;
+        payload.expectedSubitems = source.subitems ?? [];
+      }
     } else {
       Object.assign(payload, { text: draft.text, note: draft.note, quantity: draft.quantity, sectionId: draft.sectionId }, orderGuard(list));
+      if (richDescriptions && (description.length || changingDescription)) {
+        payload.description = description;
+        payload.note = '';
+      }
+      if (subchecklists && subitems.length) payload.subitems = subitems;
       if (hasPlace) payload.availability = place.availability;
       if (hasPerson) payload.recipientIds = person.ids;
     }
@@ -132,8 +200,44 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
     const result = await mutate('recipientIds' in payload ? `${action}WithPeople` : action, payload);
     if (result) saved(result, draft.id || result.createdItemId);
   };
-  const title = surface === 'details' ? 'Add detail' : surface === 'place' ? 'Choose places' : surface === 'person' ? 'For someone' : surface === 'delete' ? 'Delete this item?' : startedForSomeone ? 'Duplicate for someone else' : !draft.id && initial.id ? 'Duplicate item' : 'Item details';
-  return <Dialog title={title} busy={busy} close={closeSurface}>
+  const title = surface === 'details' ? 'Add detail' : surface === 'metadata' ? 'Other details' : surface === 'actions' ? 'Item actions'
+    : surface === 'place' ? 'Choose places' : surface === 'person' ? 'For someone' : surface === 'delete' ? 'Delete this item?'
+      : startedForSomeone ? 'Duplicate for someone else' : !draft.id && initial.id ? 'Duplicate item' : 'Item details';
+  const compactMain = compact && surface === 'item';
+  const openDetails = () => { returnFocus.current = 'add-detail'; setSurface('details'); };
+  const openActions = () => {
+    setSurface('actions');
+    requestAnimationFrame(() => form.current?.querySelector<HTMLElement>('.item-tools button:enabled')?.focus());
+  };
+  const pickerSaved = (field: 'place' | 'person') => showForm(compact ? 'metadata' : 'item', field);
+  return <Dialog title={title} busy={busy} close={closeSurface} className={compactMain ? 'item-details-dialog' : undefined} focusFirstField={!compactMain}
+    renderHeader={compactMain ? titleId => <header className="item-editor-header">
+      <button className="text-button item-editor-cancel" type="button" aria-label="Cancel" disabled={busy} onClick={close}>
+        <ArrowLeft size={20} aria-hidden="true" /><span>Cancel</span>
+      </button>
+      <h2 id={titleId}>{title}</h2>
+      <div className="item-editor-header-end">
+        <button className="primary item-editor-save" type="submit" form={formId} disabled={busy || blocked}>{busy ? 'Saving…' : 'Save'}</button>
+        {(choices.length > 0 || hasMetadata || move) && <details ref={options} className="context-menu item-editor-options" onBlur={event => {
+          if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+        }} onKeyDown={event => {
+          if (event.key === 'Escape' && event.currentTarget.open) {
+            event.preventDefault();
+            event.stopPropagation();
+            event.currentTarget.open = false;
+            event.currentTarget.querySelector('summary')?.focus();
+          }
+        }}>
+          <summary className="icon-button" aria-label="More item options" aria-disabled={busy}
+            onClick={event => { if (busy) event.preventDefault(); }}><MoreVertical size={19} aria-hidden="true" /></summary>
+          <div className="menu-panel">
+            {choices.length > 0 && <button type="button" onClick={openDetails}>Add detail</button>}
+            {hasMetadata && <button type="button" onClick={() => showForm('metadata', '')}>Other details</button>}
+            {move && <button type="button" onClick={openActions}>Item actions</button>}
+          </div>
+        </details>}
+      </div>
+    </header> : undefined}>
     {(error || validation) && <div className="dialog-error" role="alert">{validation || error}</div>}
     {surface === 'details' && <>
       <div className="detail-choices">{choices.map((key, index) => {
@@ -144,9 +248,9 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
       })}</div>
       <div className="dialog-actions"><button className="secondary" onClick={() => showItem('add-detail')}>Cancel</button></div>
     </>}
-    {surface === 'place' && <PlacesPicker initial={place} entries={usedFirst(originalPlaces, used.places)} back={closeSurface} done={value => { setPlace(value); showItem('place'); }} />}
+    {surface === 'place' && <PlacesPicker initial={place} entries={usedFirst(originalPlaces, used.places)} back={closeSurface} done={value => { setPlace(value); pickerSaved('place'); }} />}
     {surface === 'person' && <PersonPicker initial={person} people={usedFirst(originalPeople, used.people)}
-      itemText={draft.text} requireChoice={startedForSomeone} back={closeSurface} done={value => { setPerson(value); showItem('person'); }} />}
+      itemText={draft.text} requireChoice={startedForSomeone} back={closeSurface} done={value => { setPerson(value); pickerSaved('person'); }} />}
     {surface === 'delete' && <>
       <p className="dialog-copy">“{current?.text || initial.text}” will be permanently removed from this list.</p>
       {list.numbered && orderSnapshot !== list.orderToken && <p className="field-error" role="alert">The list order changed. Review the latest order and try again.</p>}
@@ -155,10 +259,26 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
         else showItem();
       }}>Delete item</button></div>
     </>}
-    {surface === 'item' && <form ref={form} noValidate onSubmit={event => { event.preventDefault(); void submit(); }}>
-      <label className="field">Item<input ref={input} autoFocus required maxLength={500} value={draft.text} onChange={event => changeDraft('text', event.target.value)} /></label>
-      {hasDescription ? <label className="field">Description<textarea data-detail="description" rows={3} maxLength={4000} value={draft.note} onChange={event => changeDraft('note', event.target.value)} /></label>
+    {(surface === 'item' || surface === 'metadata' || surface === 'actions') && <form id={formId} className={compactMain ? 'item-editor-form' : undefined} ref={form} noValidate onSubmit={event => {
+      event.preventDefault();
+      if (surface === 'item') void submit();
+      else showItem();
+    }}>
+      {surface === 'item' && <>
+      <div className="field item-name-field">
+        <div className="item-name-heading"><label htmlFor={formId + '-name'}>Item</label>
+          {compact && status && <span className="item-editor-status" role="status">
+            {status === 'Synced' ? <RefreshCw size={13} aria-hidden="true" /> : !online ? <CloudOff size={14} aria-hidden="true" /> : null}{status}
+          </span>}
+        </div>
+        <input id={formId + '-name'} ref={input} autoFocus={!compact} required maxLength={500} value={draft.text} onChange={event => changeDraft('text', event.target.value)} />
+      </div>
+      {hasDescription ? richDescriptions ? <RichDescriptionEditor value={description} lists={lists} disabled={busy} onChange={changeDescription} onPreparing={setPreparingImage} />
+        : <label className="field">Description<textarea data-detail="description" rows={3} maxLength={4000} value={draft.note} onChange={event => changeDraft('note', event.target.value)} /></label>
         : <button className="text-button add-description" type="button" onClick={() => select('description')}><Plus size={16} />Add description</button>}
+      {subchecklists && <SubchecklistEditor value={subitems} onChange={changeSubitems} open={hasSubchecklist} onOpen={() => setHasSubchecklist(true)} />}
+      </>}
+      {((surface === 'item' && !compact) || surface === 'metadata') && <>
       {hasPlace && <div className="assigned-detail">
         <button className="text-button" data-detail="place" type="button" onClick={() => select('place')}>Places<ChevronDown size={16} /></button>
         {place.availability.mode === 'anywhere' ? <span className="assigned-value">Anywhere</span> : <>
@@ -186,25 +306,38 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
       {hasSection && <label className="field">Section<select data-detail="section" value={draft.sectionId || ''} onChange={event => changeDraft('sectionId', event.target.value || null)}>
         <option value="">Unsectioned</option>{missingSection && <option value={draft.sectionId!} disabled>Section removed</option>}{list.sections.slice().sort(byPosition).map(section => <option key={section.id} value={section.id}>{section.title}</option>)}
       </select>{list.sections.length === 0 && <span className="field-help">Add a section from List actions to group items.</span>}</label>}
-      {choices.length > 0 && <button className="text-button add-detail" data-detail="add-detail" type="button" onClick={() => { returnFocus.current = 'add-detail'; setSurface('details'); }}><Plus size={17} />Add detail</button>}
+      {choices.length > 0 && <button className="text-button add-detail" data-detail="add-detail" type="button" onClick={openDetails}><Plus size={17} />Add detail</button>}
+      </>}
+      {surface === 'item' && <>
       {missingPlaces.map(id => <p className="field-error" role="alert" key={id}>{placeName(id)} is no longer available. Choose another or remove it.</p>)}
       {missingPeople.map(id => <p className="field-error" role="alert" key={id}>{personName(id)} is no longer available. Choose another or remove them.</p>)}
       {missingSection && <p className="field-error" role="alert">This section is no longer available. Choose another or move the item to Unsectioned.</p>}
-      {(placeConflict || personConflict) && <div className="detail-conflict" role="alert">
+      {(placeConflict || personConflict || descriptionConflict || subitemsConflict) && <div className="detail-conflict" role="alert">
         <p>Someone changed this item while you were editing.</p>
         {placeConflict && <p>Current places: {describePlaces(currentPlace)}</p>}
         {personConflict && <p>Current people: {currentPersonIds.map(personName).join(', ') || 'Not set'}</p>}
-        <button type="button" className="text-button" onClick={() => { setSource({ ...source, availability: currentPlace, recipientId: null, recipientIds: currentPersonIds }); clearError(); }}>Keep my changes</button>
+        {descriptionConflict && <p>The description changed.</p>}
+        {subitemsConflict && <p>The subchecklist changed.</p>}
+        <button type="button" className="text-button" onClick={() => { if (current) setSource(current); clearError(); }}>Keep my changes</button>
         <button type="button" className="text-button" onClick={() => {
           if (placeConflict) setPlace({ availability: currentPlace, newPlaces: [] });
           if (personConflict) setPerson({ ids: currentPersonIds, newPeople: [] });
-          setSource({ ...source, availability: currentPlace, recipientId: null, recipientIds: currentPersonIds });
+          if (descriptionConflict && current) {
+            setDescription(currentDescription);
+            setHasDescription(Boolean(currentDescription.length));
+          }
+          if (subitemsConflict) {
+            setSubitems(current?.subitems ?? []);
+            setHasSubchecklist(Boolean(current?.subitems?.length));
+          }
+          if (current) setSource(current);
           clearError();
         }}>Use current details</button>
       </div>}
       {orderChanged && <div className="detail-conflict" role="alert"><p>The list order changed. Review the latest order and try again.</p><button type="button" className="text-button" onClick={() => { showFullOrder(); setOrderSnapshot(list.orderToken); clearError(); }}>Review order</button></div>}
-      {move && <details className="item-tools">
-        <summary className="text-button"><ChevronDown size={17} />Item actions</summary>
+      </>}
+      {move && ((surface === 'item' && !compact) || surface === 'actions') && <details className="item-tools" open={surface === 'actions' || undefined}>
+        <summary className={surface === 'actions' ? 'visually-hidden' : 'text-button'} tabIndex={surface === 'actions' ? -1 : undefined}><ChevronDown size={17} />Item actions</summary>
         {filtered ? <div className="reorder-controls"><p className="small-muted">Show all items to edit their order.</p><button type="button" className="secondary" onClick={showFullOrder}>Edit order</button></div> : <div className="reorder-controls">
           <button type="button" className="secondary" disabled={move.targetIndex(-1) === null} onClick={async () => {
             const result = await mutate('item.move', { listId: list.id, itemId: current!.id, sectionId: current!.sectionId, index: move.targetIndex(-1), ...orderGuard(list) });
@@ -221,7 +354,11 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
           <button type="button" className="text-button danger-text" onClick={() => { clearError(); setOrderSnapshot(list.orderToken); setSurface('delete'); }}><Trash2 size={16} />Delete item</button>
         </div>
       </details>}
-      <div className="dialog-actions"><button type="button" className="secondary" onClick={close}>Cancel</button><button className="primary" disabled={blocked}>{busy ? 'Saving…' : 'Save'}</button></div>
+      {!compactMain && <div className="dialog-actions">
+        {surface === 'item' ? <><button type="button" className="secondary" onClick={close}>Cancel</button>
+          <button className="primary" disabled={blocked}>{busy ? 'Saving…' : 'Save'}</button></> :
+          <button type="button" className="secondary" onClick={() => showItem()}>Back to item</button>}
+      </div>}
     </form>}
   </Dialog>;
 
@@ -229,10 +366,11 @@ export default function ItemEditor({ list, initial, organization, filtered, busy
     const copied = { ...draft, id: '', checked: false };
     setDraft(copied);
     setSource(copied);
+    setSubitems(subitems.map(step => ({ ...step, id: newSubitemId(), checked: false })));
     setOrderSnapshot(list.orderToken);
     setStartedForSomeone(forAnotherPerson);
     if (forAnotherPerson) { setPerson(emptyPeople); setSurface('person'); }
-    else input.current?.focus();
+    else showItem('item');
   }
 }
 

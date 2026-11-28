@@ -43,6 +43,7 @@ internal fun DetailScreen(
     val ui = model.ui
     val filter = ui.filters[list.id] ?: ListFilter()
     val showDetails = ui.hiddenDetails[list.id] != true
+    var expandedItems by remember(list.id) { mutableStateOf(emptySet<String>()) }
     val hiddenSaved = ui.hiddenSavedItems[list.id]
     val capture = ui.itemCapture[list.id].orEmpty()
     val organization = state.workspace.version >= 3
@@ -381,6 +382,10 @@ internal fun DetailScreen(
                                 }
                                 val animatingDrag = drag.activeKey == entry.key
                                 val moveTarget = reordering && dragTarget == entry.key
+                                val showDescription = showDetails && item.description.isNotEmpty()
+                                val showSteps = list.kind == "checklist" && item.subitems.isNotEmpty()
+                                val expandable = !reordering && selected == null && (showDescription || showSteps)
+                                val expanded = expandable && entry.key in expandedItems
                                 ItemRow(
                                     list,
                                     item,
@@ -388,7 +393,7 @@ internal fun DetailScreen(
                                     toggle,
                                     { if (rowSelected == null) edit(Editor.ItemForm(list, item)) else toggle() },
                                     ordinal = ordinals[item.id],
-                                    description = item.note.takeIf { showDetails }.orEmpty(),
+                                    description = item.descriptionText.takeIf { showDetails && (!showDescription || !expanded) }.orEmpty(),
                                     detail = if (showDetails) list.itemMetadata(item, filter, grouping) else "",
                                     alias = entry.row.aliasSummary,
                                     selected = rowSelected,
@@ -411,6 +416,54 @@ internal fun DetailScreen(
                                             shape = RoundedCornerShape(18.dp)
                                         } else Modifier,
                                     ),
+                                    detailsExpanded = expanded,
+                                    expandDetails = if (!expandable) null else {
+                                        {
+                                            expandedItems = if (expanded) expandedItems - entry.key else expandedItems + entry.key
+                                        }
+                                    },
+                                    expandedDetails = if (!expandable) null else {
+                                        {
+                                            Column(
+                                                Modifier.fillMaxWidth().padding(start = 37.dp, end = 16.dp, bottom = 10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                            ) {
+                                                if (showDescription) {
+                                                    DescriptionContent(
+                                                        item.description,
+                                                        openList = { id ->
+                                                            if (state.workspace.lists.any { it.id == id }) model.select(id)
+                                                            else model.report("This list is unavailable.")
+                                                        },
+                                                        report = model::report,
+                                                        toggleCheckbox = if (!writable || "item-descriptions" !in state.capabilities) null else {
+                                                            { index, checked ->
+                                                                val description = item.description.mapIndexed { i, block ->
+                                                                    if (i == index) block.copy(checked = checked) else block
+                                                                }
+                                                                model.action("item.updateDescription", payload(
+                                                                    "listId" to list.id, "itemId" to item.id,
+                                                                    "description" to description.map { it.toPayload() },
+                                                                    "expectedDescription" to item.description.map { it.toPayload() },
+                                                                ))
+                                                            }
+                                                        },
+                                                    )
+                                                }
+                                                if (showSteps) {
+                                                    for (step in item.subitems) key(step.id) {
+                                                        SubchecklistStep(
+                                                            step, writable && "checklist-subitems" in state.capabilities,
+                                                            toggle = { checked -> model.action("subitem.update", payload(
+                                                                "listId" to list.id, "itemId" to item.id, "subitemId" to step.id,
+                                                                "checked" to checked,
+                                                            )) },
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
                                 )
                             }
                         }
@@ -419,7 +472,7 @@ internal fun DetailScreen(
                 if (showingCapture) {
                     ListDetailComposer(
                         capture, { if (writable) ui.itemCapture[list.id] = it },
-                        connected = state.connected, writable = writable, focus = captureFocus, add = addItem,
+                        connected = state.canEditWorkspace, writable = writable, focus = captureFocus, add = addItem,
                     )
                 }
             }
@@ -601,7 +654,7 @@ private fun ListDetailOptions(
                     edit(Editor.Share(list))
                     model.loadSharing(list.id)
                 },
-                enabled = writable,
+                enabled = writable && state.connected,
             )
             DropdownMenuItem(
                 text = { Text("Refresh lists") },
@@ -612,18 +665,37 @@ private fun ListDetailOptions(
                 },
                 enabled = !state.busy,
             )
-            if (list.kind == "checklist" && !list.isTemplate && !list.archived && list.checkedCount > 0)
+            if (list.kind == "checklist" && !list.isTemplate && !list.archived &&
+                list.items.any { it.checked || it.subitems.any(Subitem::checked) })
                 DropdownMenuItem(
-                    text = { Text("Reset checkmarks") },
+                    text = { Text("Start again") },
                     leadingIcon = { Icon(Icons.Outlined.RestartAlt, null) },
                     onClick = {
                         more = false
                         confirm(Confirmation(
-                            "Reset checkmarks?",
-                            if (list.shared) "This resets checkmarks for everyone."
-                            else "This clears checkmarks and keeps every item, quantity, and note.",
-                            "Reset checkmarks",
+                            "Start this list again?",
+                            if (list.shared) "This clears item and subchecklist checkmarks for everyone."
+                            else "This clears item and subchecklist checkmarks.",
+                            "Start again",
                         ) { model.action("list.reset", payload("listId" to list.id)) })
+                    },
+                    enabled = writable,
+                )
+            if ("delete-done" in state.capabilities && list.kind == "checklist" && !list.isTemplate &&
+                !list.archived && list.items.any { it.checked })
+                DropdownMenuItem(
+                    text = { Text("Delete done") },
+                    leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
+                    onClick = {
+                        more = false
+                        val ids = list.items.filter { it.checked }.map { it.id }
+                        val count = if (ids.size == 1) "1 completed item" else "${ids.size} completed items"
+                        val sharedNotice = if (list.shared) " This affects everyone on the list." else ""
+                        confirm(Confirmation(
+                            "Delete $count?",
+                            "This permanently deletes the completed items and their steps, including items hidden by filters.$sharedNotice",
+                            "Delete done", danger = true,
+                        ) { model.action("list.deleteDone", payload("listId" to list.id, "itemIds" to ids)) })
                     },
                     enabled = writable,
                 )
@@ -709,12 +781,13 @@ private fun ListDetailOptions(
                                 "Your edits stay with the list. You’ll need a new invitation to return.",
                                 "Leave",
                                 true,
+                                requiresConnection = true,
                             ) {
                                 model.sharingAction("leave", list.id)
                             }
                         )
                     },
-                    enabled = writable,
+                    enabled = writable && state.connected,
                 )
         }
     }

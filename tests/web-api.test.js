@@ -1,11 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import ts from 'typescript';
+import * as api from '../src/api.ts';
 
-const source = await readFile(new URL('../src/api.ts', import.meta.url), 'utf8');
-const javascript = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
-const api = await import('data:text/javascript;base64,' + Buffer.from(javascript).toString('base64'));
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 
 test('web login rejects HTML and malformed successful sessions instead of assuming authentication', async t => {

@@ -15,7 +15,7 @@ Successful browser account mutations return session state. Browser tokens are op
 
 ## Native Android authentication and shared API
 
-The web and native apps use the same accounts, workspace commands, permissions, search, invitations, import and export endpoints documented below. There is no device-specific workspace or synchronization copy. Refresh `GET /api/workspace` when returning to the foreground and after a successful mutation; mutation responses already contain the authoritative workspace. Serialize mutations and do not automatically retry ambiguous create/import requests after connection loss; fetch the workspace to check the result first.
+The web and native apps use the same accounts, workspace commands, permissions, search, invitations, import and export endpoints. The mutation response contains the authoritative workspace. Refresh `GET /api/workspace` when returning to the foreground and serialize pending mutations. Offline clients can retry queued actions with an operation ID.
 
 Native clients use HTTPS in production and these explicit endpoints:
 
@@ -23,7 +23,7 @@ Native clients use HTTPS in production and these explicit endpoints:
 | --- | --- | --- |
 | `POST /api/native/auth/register` | `{ username, password }` | Native session plus a new bearer token |
 | `POST /api/native/auth/login` | `{ username, password }` | Native session plus a new bearer token |
-| `GET /api/native/auth/session` | Bearer header | `{ authenticated, userId?, username?, setupRequired: false }`, without token; signed-out state is HTTP 200 |
+| `GET /api/native/auth/session` | Bearer header | `{ authenticated, userId?, username?, expiresAt?, setupRequired: false }`, without token. Signed-out state is HTTP 200. |
 | `POST /api/native/auth/logout` | `{}`, bearer header | `{ authenticated: false, setupRequired: false }`; revokes this token, idempotent when already expired |
 | `POST /api/native/auth/password` | `{ currentPassword, newPassword }`, bearer header | New native session and token; revokes **all** this account's existing native and browser sessions |
 
@@ -47,9 +47,9 @@ Store the native token using Android Keystore-backed encrypted application-priva
 
 Native clients send JSON for POSTs and omit browser `Origin`, `Sec-Fetch-Site` and cookies. Native routes and bearer-authenticated reads enforce the same origin validation as writes: supplied cross-site origins/Fetch Metadata are rejected, and no cross-origin CORS access is enabled. Tokens are accepted only in Authorization headers, never query parameters or request bodies. TLS termination remains the responsibility of the deployment proxy.
 
-`GET /api/capabilities` is a public, non-cacheable compatibility probe returning `{ "apiVersion": 1, "workspaceVersion": 4, "authentication": ["cookie", "bearer"], "features": ["sharing", "search", "import", "export", "list-organization", "numbered-lists", "guarded-order", "multiple-recipients", "bulk-assignments", "visible-item-order", "group-order", "list-covers"] }`. `apiVersion` describes this HTTP contract independently of backup `version`. Native clients should verify bearer support before presenting sign-in against a configured server. Clients should also check feature support before offering organization controls or importing a backup from a newer workspace version.
+`GET /api/capabilities` is a public, non-cacheable compatibility probe returning `{ "apiVersion": 1, "workspaceVersion": 4, "authentication": ["cookie", "bearer"], "features": ["sharing", "search", "import", "export", "list-organization", "numbered-lists", "guarded-order", "multiple-recipients", "bulk-assignments", "visible-item-order", "group-order", "list-covers", "item-descriptions", "checklist-subitems", "offline-actions", "offline-import"] }`. `apiVersion` describes this HTTP contract independently of backup `version`. Native clients should verify bearer support before presenting sign-in against a configured server. Check capability flags to determine which operations the configured server supports.
 
-All URLs are same-origin. Errors have `{ "error": "Human-readable message" }`, an optional `code`, and a non-2xx status. JSON writes are limited to 5 MiB. All writes reject cross-site origins. Auth, invitation and sharing bodies are limited to 8 KiB. Vite's development proxy must preserve the incoming Host (`changeOrigin: false`). A successful list mutation returns the account's authoritative workspace. Clients send granular commands and serialize pending actions. Identity and permissions come from the session, never from submitted owner fields.
+All URLs are same-origin. Errors contain `{ "error": "Human-readable message" }`, an optional `code`, and a non-2xx status. JSON writes are limited to 5 MiB. Guarded description edits and queued backup imports may send up to 10 MiB plus 64 KiB to carry their guard or ID mapping. A backup document inside a queued import still has a 5 MiB limit. All writes reject cross-site origins. Auth, invitation and sharing bodies are limited to 8 KiB. Vite's development proxy must preserve the incoming Host (`changeOrigin: false`). Identity and permissions come from the session.
 
 ## List covers
 
@@ -57,6 +57,8 @@ The `list-covers` capability enables authenticated cover reads and uploads. The 
 
 * `GET /api/lists/{listId}/cover?v={coverId}` returns private WebP bytes for an owner or current editor, or 404 when unavailable.
 * `PUT /api/lists/{listId}/cover` accepts a raw JPEG, PNG or WebP body up to 2 MiB. Gather checks membership and the request origin, decodes and scales the picture, strips metadata, and returns the updated workspace. This route is the binary exception to JSON writes.
+
+With `offline-actions`, cover uploads can send `Idempotency-Key` for safe retries and `If-Match` with the last known `coverId` or `none` if no cover was present. A stale cover returns `409 COVER_CHANGED`. A keyed cover upload receipt includes `resolvedCoverId` with the stored image's hash.
 
 Covers share the lifetime of their owning list in SQLite. Duplicating a list copies its cover. Importing a portable JSON backup creates lists with the built-in artwork. Generation uses only the list title and description. The client sees the new hash on its regular workspace refresh.
 
@@ -99,7 +101,7 @@ IDs are globally unique. `categoryId` and `sectionId` may be null. Items belong 
 
 `POST /api/actions` accepts `{ "type": "item.create", "payload": {...} }`:
 
-Successful creation commands return the full workspace plus the exact ID created by the command. `list.create` and `list.clone` return `createdListId`. `item.create`, `place.create` and `recipient.create` return `createdItemId`, `createdPlaceId` and `createdRecipientId` respectively. These IDs appear only on the successful command response.
+Successful creation commands return the full workspace plus the exact ID created by the command. `list.create` and `list.clone` return `createdListId`. Category, section, item, subitem, place and recipient creation return `createdCategoryId`, `createdSectionId`, `createdItemId`, `createdSubitemId`, `createdPlaceId` and `createdRecipientId` respectively. Receipt fields appear only on command responses.
 
 | Type | Payload |
 | --- | --- |
@@ -111,13 +113,19 @@ Successful creation commands return the full workspace plus the exact ID created
 | list.delete | listId |
 | list.clone | listId, title? |
 | list.reset | listId; resets completion only; active checklist working lists only |
+| list.deleteDone | listId, itemIds (1–5000 IDs confirmed by the user). Deletes only those still checked in this active checklist. Missing or reopened items are skipped. Requires the `delete-done` capability. |
 | section.create | listId, title, expectedOrderToken on numbered lists |
 | section.update | listId, sectionId, title |
 | section.delete | listId, sectionId, expectedOrderToken on numbered lists. Items append to the unsectioned group. |
 | section.move | listId, sectionId, index (zero-based within sections), expectedOrderToken on numbered lists |
-| item.create | listId, text, quantity?, note?, checked?, sectionId?, availability?, recipientId?, newPlaces?, newRecipient?, expectedOrderToken on numbered lists |
-| item.update | listId, itemId, text?, quantity?, note?, checked?, sectionId?, availability?, recipientId?, newPlaces?, newRecipient?, expectedAvailability or expectedRecipientId for corresponding edits, expectedOrderToken when changing sections on numbered lists |
+| item.create | listId, text, quantity?, note?, description?, subitems?, checked?, sectionId?, availability?, recipientId?, newPlaces?, newRecipient?, expectedOrderToken on numbered lists |
+| item.update | listId, itemId, text?, quantity?, note?, description?, subitems?, checked?, sectionId?, availability?, recipientId?, newPlaces?, newRecipient?, expectations for edited fields |
 | item.createWithPeople / item.updateWithPeople | Same item fields as create/update. Use `recipientIds` for existing people and `newRecipients` for inline name objects. Include `expectedRecipientIds` when replacing an existing assignment. |
+| item.updateDescription | listId, itemId, description, expectedDescription |
+| subitem.create | listId, itemId, text, checked?, subitemId? |
+| subitem.update | listId, itemId, subitemId, text?, checked? |
+| subitem.delete | listId, itemId, subitemId |
+| subitem.move | listId, itemId, subitemId, index (zero-based), expectedSubitemIds? |
 | item.bulkAdd | listId, itemIds, placeIds?, recipientIds?, newPlaces?, newRecipients?, expectedAnywhereItemIds? |
 | group.reorder | listId, kind (person or place), groupIds, expectedGroupIds |
 | item.reorderVisible | listId, itemIds in the desired order, expectedOrderToken |
@@ -130,8 +138,31 @@ Successful creation commands return the full workspace plus the exact ID created
 | recipient.update | listId, recipientId, name? |
 | recipient.delete | listId, recipientId, expectedAssignmentToken |
 | samples.remove | empty object |
+| workspace.import | workspace (backup document), contentIds? (source IDs mapped to IDs for the new copies) |
 
 New lists default to icon `list`, color `sage`, no category, kind `checklist`, repeatCadence `manual`, and all flags false. `isSample` is server-owned. Kind is `checklist` or `notes`; cadence is `manual`, `daily`, or `weekly`. Cadence is metadata only, with no automatic resets. Kind changes preserve every item, including historical checked flags, and cadence. Notes reject all item.update checked properties and checked:true on item.create (omitted/false is allowed); ordinary content edits and moves remain available. Reset rejects notes, template masters, and archived lists. Imports may retain checked history on notes. Clone generates independent child IDs, inherits kind/cadence and content/presentation, and resets completion, favorite, archive, template, and sample flags. Default clone title is `Title (copy)` for ordinary lists or `Title — Sep 29, 2026` for templates (server local date). The client may provide its local dated title.
+
+### Item descriptions and subchecklists
+
+`item-descriptions` adds an optional `description` block array to each item. The legacy `note` field remains readable and editable. A client converting a note to rich text can set `note` to an empty string alongside `description` and send the previous `note` as `expectedNote`.
+
+Paragraph, bullet and numbered blocks have `{ type, runs }`. A checkbox block also has `checked`. Each run has `text` and can have boolean `bold`, `italic`, `underline` and `strike` marks. A run can have a link `{ type: 'list', listId }` or `{ type: 'external', url }`. External URLs support HTTP, HTTPS and mailto. Access to a linked Gather list still requires current membership or ownership. An image block has `{ type: 'image', dataUrl, display, alt? }`. The display is `inline` or `attachment`. Uploads use standard base64 data URLs for JPEG, PNG or WebP, up to 2 MiB per image. The server decodes static images up to 16 megapixels, strips metadata and stores WebP at up to 1,440 pixels on the longer side. Limits per item are 100 description blocks, 500 runs per block, 16,000 total run text characters and eight images. Limits per link URL and image alt text are 2,000 and 500 characters respectively.
+
+Send the current description as `expectedDescription` when replacing it on an existing item. Use an empty array when there is no description. Send an empty `description` to clear it. A stale or missing expectation returns `409 DESCRIPTION_CHANGED`. Checklist resets and clones preserve rich description checkbox states.
+
+`checklist-subitems` adds an optional ordered `subitems` array to each item. Up to 100 children have `{ id, text, checked }`, with nonempty text up to 500 characters. Child completion is independent from parent completion. Checklist resets and clones clear both. Converting a list to notes retains existing children and their completion history. Edit children on checklist lists.
+
+Use the granular `subitem.*` commands to update separate children or separate fields without replacing the array. A full replacement via `item.update` or `item.updateWithPeople` requires `expectedSubitems` with the current ordered array, using `[]` when there are no children. A stale expectation returns `409 SUBITEMS_CHANGED`. `subitem.move` can include `expectedSubitemIds` to guard against concurrent ordering or membership changes. Replacing an item's section still uses `expectedOrderToken` when required by the list's ordering rules.
+
+### Offline action replay
+
+With `offline-actions`, send an `operationId` alongside the action's `type` and `payload`. An operation ID can be a client-generated UUID. Successful operations store a receipt in the same transaction as the change. A retry with the same ID and request returns the current authoritative workspace and original receipt. The IDs are scoped to each account and shared with cover upload keys. A different request using a committed ID returns `409 OPERATION_ID_REUSED`. Failed commands leave the ID available for a corrected request. Retries still require a valid session and the response contains only currently accessible lists.
+
+Create commands can use supplied category, list, section, item, subitem, place and recipient IDs from their corresponding `...Id` payload fields. Clone takes source `listId`, optional `createdListId` for the copy, and optional `contentIds` mapping source children to their new IDs. Unmapped children receive generated IDs. Inline place/person drafts accept `placeId` or `recipientId`. If a draft resolves to an already existing label, the action receipt includes a `resolvedIds` map from the supplied ID to the existing ID.
+
+When a description image is normalized, the action receipt includes a `resolvedImages` map from the SHA-256 hex digest of each changed source data URL to the digest of its stored data URL. Digest the complete UTF-8 data URL, including its media prefix.
+
+`offline-import` enables the `workspace.import` action. It validates the same backup document as `POST /api/import` and atomically adds private copies. Its optional `contentIds` map can include categories, lists and their children. Omitted IDs receive generated values. Clients can use a complete mapping so later offline commands can refer to imported records before synchronization.
 
 ### Places, people and ordering
 
@@ -157,9 +188,9 @@ The optional list fields `personGroupOrder` and `placeGroupOrder` store shared d
 
 ### Backup compatibility
 
-`POST /api/import` accepts full version 1 through 4 documents and atomically adds private copies after complete validation. List, item, section, category, place and recipient IDs and references are remapped. Import preserves completion history. Clone remaps its children and preserves numbering, definitions and assignments while clearing completion. Version 1 migrates each list to checklist/manual. Version 2 requires valid kind and cadence. Version 3 validates explicit organization fields, including references and duplicate IDs. Unknown properties are discarded. Limits are 100 categories, 1000 lists, 100 sections per list, 5000 items per list and 20000 total items. Text limits are 200 characters for list and section titles, 80 for category names, 500 for item text, 100 for quantity, 4000 for notes and descriptions, and 40 for icons. Required text rejects whitespace-only input. Malformed JSON and invalid documents reject the whole import.
+`POST /api/import` accepts full version 1 through 4 documents and atomically adds private copies after complete validation. List, item, subitem, section, category, place and recipient IDs and references are remapped. Rich links targeting imported lists follow those copies. Import preserves completion history and validates embedded images. Clone remaps its children and preserves numbering, definitions and assignments while clearing item and subitem completion. Version 1 migrates each list to checklist/manual. Version 2 requires valid kind and cadence. Version 3 validates explicit organization fields, including references and duplicate IDs. Unknown properties are discarded. Limits are 100 categories, 1000 lists, 100 sections per list, 5000 items per list and 20000 total items. Text limits are 200 characters for list and section titles, 80 for category names, 500 for item text, 100 for quantity, 4000 for notes and list descriptions, and 40 for icons. Required text rejects whitespace-only input. Malformed JSON and invalid documents reject the whole import.
 
-Exports are version 4 with sparse default organization fields. They include owned list content, including place and recipient labels, samples, archived lists, templates, completion history and timestamps. Account records, sharing metadata, conflict tokens and personal display filters are excluded. Keep the original version number when transferring backups.
+Exports are version 4 with sparse default fields. They include owned list content, including item descriptions with images, subitems, place and recipient labels, samples, archived lists, templates, completion history and timestamps. Account records, sharing metadata, operation receipts, conflict tokens and personal display filters are excluded. Keep the original version number when transferring backups.
 
 `GET /api/health` returns `{ "status": "ok" }` after checking database readability.
 
@@ -169,6 +200,6 @@ The Node server entry is `server/index.js`. `HOST` defaults to `127.0.0.1`, `POR
 
 `POST /api/search` is a read-only retrieval operation with the same origin/JSON/body checks as other POST endpoints. Payload: `{ "query": "USB-C cable", "scope": "library", "categoryId": null, "limit": 60 }`. Query is text up to 500 characters; scope is `library`, `favorites`, `templates`, `archive`, or explicit `all`; categoryId is null/omitted or an existing category ID; limit is an integer 1–125 (default 60). Results are scoped before ranking. Library/favorites exclude templates and archived lists. Search never changes workspace data.
 
-The response is `{ "results": [{ "listId": "uuid", "score": 1, "match": { "text": "actual stored content", "field": "note", "itemId": "optional uuid", "sectionId": "optional uuid" }, "matchType": "exact" }], "provider": "fuzzy", "status": "ready" }`. Match fields are title/description/category/section/item/note/quantity; match type is exact/fuzzy/semantic. Provider is local/fuzzy/openai; status is ready/warming/degraded, with an optional safe reason. Evidence comes from existing workspace content. Frontends must disregard stale queries and use result order without an additional substring filter. Model/provider failures retain lexical/fuzzy retrieval.
+The response is `{ "results": [{ "listId": "uuid", "score": 1, "match": { "text": "actual stored content", "field": "note", "itemId": "optional uuid", "sectionId": "optional uuid" }, "matchType": "exact" }], "provider": "fuzzy", "status": "ready" }`. Match fields are title, description, category, section, item, note, quantity and subitem. The match type is exact, fuzzy or semantic. Provider is local, fuzzy or openai. Status is ready, warming or degraded, with an optional safe reason. Evidence comes from existing workspace content. Frontends must disregard stale queries and use result order without an additional substring filter. Model/provider failures retain lexical/fuzzy retrieval.
 
 `GET /api/search/status` exposes only safe capability metadata `{ "provider": "local", "model": "configured model", "state": "warming" }` with optional safe reason. No credentials are included. Search uses server-only derived data and never adds index/model data to exports. Health and workspace requests do not wait for semantic model loading. `SEARCH_PROVIDER=fuzzy` disables model loading and all provider network calls; local is the default, with lazy warmup on the first nonempty query.

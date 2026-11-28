@@ -6,6 +6,7 @@ import { InputError, bool, fail, id, object, string } from './input.mjs';
 import { WORKSPACE_VERSION, reorderGroups, bulkAdd, editAssignments, editDictionary, guardOrder, mapContentIds, orderToken, readItemOrganization, readOrganization, remapListContent } from './organization.mjs';
 import { seedWorkspace } from './seed.mjs';
 import { createCoverStore } from './covers.mjs';
+import { editItemDetails, editSubitem, readItemDetails, resetItemCompletion } from './item-details.mjs';
 
 export { InputError, WORKSPACE_VERSION };
 export const WORKSPACE_BYTE_LIMIT = 5 * 1024 * 1024;
@@ -14,10 +15,26 @@ function boundedDocument(value) {
   if (Buffer.byteLength(document, 'utf8') > WORKSPACE_BYTE_LIMIT) throw new InputError('Workspace exceeds 5 MiB limit. Remove items or shorten notes before adding more.', 413);
   return document;
 }
+function orderedJson(value, depth = 0) {
+  if (depth > 64) fail('Action payload is nested too deeply.');
+  if (Array.isArray(value)) return '[' + value.map(entry => orderedJson(entry, depth + 1)).join(',') + ']';
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + orderedJson(value[key], depth + 1)).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+function operation(input) {
+  if (!Object.hasOwn(input, 'operationId')) return null;
+  return {
+    id: id(input.operationId),
+    fingerprint: createHash('sha256').update(orderedJson([input.type, input.payload])).digest('hex'),
+  };
+}
 const pos = value => Number.isSafeInteger(value) && value >= 0 ? value : fail('Position must be a nonnegative integer.');
 const colors = new Set(['sage', 'peach', 'lavender', 'sky', 'sand', 'rose']);
 const color = value => colors.has(value) ? value : fail('Unknown color.');
 const find = (array, value, name) => array.find(entry => entry.id === value) || fail(`${name} not found.`);
+const createdId = (payload, key) => Object.hasOwn(payload, key) ? id(payload[key]) : randomUUID();
 function normalize(array) { array.sort((a,b) => a.position - b.position).forEach((entry, index) => { entry.position = index; }); }
 function appendPosition(array) { return pos(array.reduce((max, entry) => Math.max(max, entry.position), -1) + 1); }
 function normalizeItems(list) { for (const sectionId of [null, ...list.sections.map(s => s.id)]) normalize(list.items.filter(item => item.sectionId === sectionId)); }
@@ -53,6 +70,7 @@ export function validateWorkspace(input, { boundInput = true } = {}) {
       const item = { id: unique(i.id), position: pos(i.position), sectionId: section(result, i.sectionId) };
       for (const [key, validator] of Object.entries(itemFields)) item[key] = validator(i[key]);
       if (organizationIds) readItemOrganization(i, item, organizationIds);
+      readItemDetails(i, item, unique);
       return item;
     });
     return result;
@@ -97,7 +115,12 @@ export function applyAction(workspace, action) {
   if (type === 'item.createWithPeople') type = 'item.create';
   if (type === 'item.updateWithPeople') type = 'item.update';
   if (type === 'samples.remove') { workspace.lists = workspace.lists.filter(l => !l.isSample); normalize(workspace.lists); return; }
-  if (type === 'category.create') { if (workspace.categories.length >= 100) fail('Category limit reached.'); workspace.categories.push({ id: randomUUID(), name: string(p.name, 'Category name', 80, true), color: color(p.color ?? 'sage'), position: appendPosition(workspace.categories) }); return; }
+  if (type === 'category.create') {
+    if (workspace.categories.length >= 100) fail('Category limit reached.');
+    const categoryId = createdId(p, 'categoryId');
+    workspace.categories.push({ id: categoryId, name: string(p.name, 'Category name', 80, true), color: color(p.color ?? 'sage'), position: appendPosition(workspace.categories) });
+    return { createdCategoryId: categoryId };
+  }
   if (type.startsWith('category.')) {
     const c = find(workspace.categories, id(p.categoryId), 'Category');
     if (type === 'category.update') fields(c, p, { name: v => string(v, 'Category name', 80, true), color });
@@ -107,7 +130,7 @@ export function applyAction(workspace, action) {
   }
   if (type === 'list.create') {
     if (workspace.lists.length >= 1000) fail('List limit reached.');
-    const l = { id: randomUUID(), title: string(p.title, 'Title', 200, true), description: '', icon: 'list', color: 'sage', categoryId: null, favorite: false, archived: false, isTemplate: false, isSample: false, kind: 'checklist', repeatCadence: 'manual', createdAt: now, updatedAt: now, position: appendPosition(workspace.lists), sections: [], items: [] };
+    const l = { id: createdId(p, 'listId'), title: string(p.title, 'Title', 200, true), description: '', icon: 'list', color: 'sage', categoryId: null, favorite: false, archived: false, isTemplate: false, isSample: false, kind: 'checklist', repeatCadence: 'manual', createdAt: now, updatedAt: now, position: appendPosition(workspace.lists), sections: [], items: [] };
     fields(l, p, listFields); if (Object.hasOwn(p, 'categoryId')) l.categoryId = p.categoryId === null ? null : find(workspace.categories, id(p.categoryId), 'Category').id;
     if (Object.hasOwn(p, 'numbered') && bool(p.numbered, 'Numbered')) l.numbered = true;
     workspace.lists.push(l); return { createdListId: l.id };
@@ -128,15 +151,32 @@ export function applyAction(workspace, action) {
     if (Object.hasOwn(p, 'categoryId')) l.categoryId = p.categoryId === null ? null : find(workspace.categories, id(p.categoryId), 'Category').id;
   }
   else if (type === 'list.delete') { workspace.lists = workspace.lists.filter(x => x !== l); normalize(workspace.lists); }
-  else if (type === 'list.reset') { if (l.kind !== 'checklist' || l.isTemplate || l.archived) fail('Only active checklist working lists can start again.'); l.items.forEach(i => { i.checked = false; }); }
+  else if (type === 'list.reset') { if (l.kind !== 'checklist' || l.isTemplate || l.archived) fail('Only active checklist working lists can start again.'); l.items.forEach(resetItemCompletion); }
+  else if (type === 'list.deleteDone') {
+    if (l.kind !== 'checklist' || l.isTemplate || l.archived) fail('Only active checklists can delete done items.');
+    if (!Array.isArray(p.itemIds) || !p.itemIds.length || p.itemIds.length > 5000) fail('Choose completed items from this list.');
+    // The user confirmed these IDs. Check completion again against the current list.
+    const confirmed = new Set(p.itemIds.map(id));
+    const remaining = l.items.filter(item => !item.checked || !confirmed.has(item.id));
+    if (remaining.length === l.items.length) return;
+    l.items = remaining;
+    normalizeItems(l);
+  }
   else if (type === 'list.clone') {
     if (workspace.lists.length >= 1000) fail('List limit reached.');
     if (workspace.lists.reduce((n,x) => n+x.items.length,0) + l.items.length > 20000) fail('Workspace item limit reached.');
-    const copy = remapListContent(l, mapContentIds(l), true);
-    Object.assign(copy, { id: randomUUID(), title: p.title === undefined ? `${l.title} ${l.isTemplate ? '— ' + new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '(copy)'}`.slice(0,200) : string(p.title, 'Title', 200, true), favorite: false, archived: false, isTemplate: false, isSample: false, createdAt: now, updatedAt: now, position: appendPosition(workspace.lists) });
+    const copyId = createdId(p, 'createdListId');
+    const mapping = mapContentIds(l, new Map([[l.id, copyId]]), p.contentIds);
+    const copy = remapListContent(l, mapping, true);
+    Object.assign(copy, { id: copyId, title: p.title === undefined ? `${l.title} ${l.isTemplate ? '— ' + new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '(copy)'}`.slice(0,200) : string(p.title, 'Title', 200, true), favorite: false, archived: false, isTemplate: false, isSample: false, createdAt: now, updatedAt: now, position: appendPosition(workspace.lists) });
     workspace.lists.push(copy); return { createdListId: copy.id };
   }
-  else if (type === 'section.create') { if (l.sections.length >= 100) fail('Section limit reached.'); l.sections.push({ id: randomUUID(), title: string(p.title, 'Section title', 200, true), position: appendPosition(l.sections) }); }
+  else if (type === 'section.create') {
+    if (l.sections.length >= 100) fail('Section limit reached.');
+    const sectionId = createdId(p, 'sectionId');
+    l.sections.push({ id: sectionId, title: string(p.title, 'Section title', 200, true), position: appendPosition(l.sections) });
+    receipt = { createdSectionId: sectionId };
+  }
   else if (type.startsWith('section.')) {
     const s = find(l.sections, id(p.sectionId), 'Section');
     if (type === 'section.update') s.title = string(p.title, 'Section title', 200, true);
@@ -148,14 +188,15 @@ export function applyAction(workspace, action) {
     if (l.kind === 'notes' && Object.hasOwn(p, 'checked') && p.checked !== false) fail('Notes cannot have new checked items.');
     if (l.items.length >= 5000 || workspace.lists.reduce((n,x) => n+x.items.length,0) >= 20000) fail('Item limit reached.');
     const sectionId = section(l, p.sectionId ?? null);
-    const i = { id: randomUUID(), text: string(p.text,'Item text',500,true), quantity: '', note: '', checked: false, sectionId, position: appendPosition(l.items.filter(x => x.sectionId === sectionId)) };
+    const i = { id: createdId(p, 'itemId'), text: string(p.text,'Item text',500,true), quantity: '', note: '', checked: false, sectionId, position: appendPosition(l.items.filter(x => x.sectionId === sectionId)) };
     fields(i,p,itemFields);
-    editAssignments(l,i,p);
+    editItemDetails(l, i, p);
+    const assignments = editAssignments(l,i,p);
     l.items.push(i);
-    receipt = { createdItemId: i.id };
+    receipt = { createdItemId: i.id, ...assignments };
   }
   else if (type === 'group.reorder') reorderGroups(l, p);
-  else if (type === 'item.bulkAdd') bulkAdd(l, p, selectedItems(l, p.itemIds));
+  else if (type === 'item.bulkAdd') receipt = bulkAdd(l, p, selectedItems(l, p.itemIds));
   else if (type === 'item.reorderVisible') reorderVisible(l, p);
   else if (type.startsWith('item.')) {
     const i = find(l.items, id(p.itemId), 'Item');
@@ -166,13 +207,21 @@ export function applyAction(workspace, action) {
       if (l.kind === 'notes' && Object.hasOwn(p, 'checked')) fail('Completion edits are unavailable for notes.');
       const changesSection = Object.hasOwn(p, 'sectionId') && p.sectionId !== i.sectionId;
       if (changesSection) guardOrder(l, p);
+      if (Object.hasOwn(p, 'note') && Object.hasOwn(p, 'expectedNote') &&
+          string(p.expectedNote, 'Expected note', 4000) !== i.note) {
+        throw new InputError('Description changed. Review the item and try again.', 409, 'DESCRIPTION_CHANGED');
+      }
       fields(i,p,itemFields);
-      editAssignments(l,i,p,true);
+      editItemDetails(l, i, p, true);
+      receipt = editAssignments(l,i,p,true);
       if (changesSection) {
         i.sectionId = section(l,p.sectionId);
         i.position = appendPosition(l.items.filter(x => x !== i && x.sectionId === i.sectionId));
         normalizeItems(l);
       }
+    } else if (type === 'item.updateDescription') {
+      if (!Object.hasOwn(p, 'description')) fail('Provide a description.');
+      editItemDetails(l, i, { description: p.description, ...(Object.hasOwn(p, 'expectedDescription') ? { expectedDescription: p.expectedDescription } : {}) }, true);
     } else if (type === 'item.move') {
       const sectionId = section(l,p.sectionId);
       const ordered = l.items.filter(x => x !== i && x.sectionId === sectionId).sort((a,b) => a.position-b.position);
@@ -183,6 +232,10 @@ export function applyAction(workspace, action) {
       ordered.forEach((x,index) => { x.position = index; });
       normalizeItems(l);
     } else fail('Unknown action.');
+  }
+  else if (['subitem.create', 'subitem.update', 'subitem.delete', 'subitem.move'].includes(type)) {
+    const item = find(l.items, id(p.itemId), 'Item');
+    receipt = editSubitem(l, item, type.slice('subitem.'.length), p);
   }
   else if (type.startsWith('place.') || type.startsWith('recipient.')) {
     const [entity, command] = type.split('.');
@@ -229,6 +282,7 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
     CREATE INDEX IF NOT EXISTS list_members_user ON list_members(user_id);
     CREATE TABLE IF NOT EXISTS list_preferences(user_id TEXT NOT NULL,list_id TEXT NOT NULL REFERENCES list_owners(list_id) ON DELETE CASCADE,document TEXT NOT NULL,PRIMARY KEY(user_id,list_id));
     CREATE TABLE IF NOT EXISTS list_invitations(list_id TEXT PRIMARY KEY REFERENCES list_owners(list_id) ON DELETE CASCADE,token_hash TEXT NOT NULL UNIQUE,expires_at INTEGER NOT NULL,consumed_by TEXT);
+    CREATE TABLE IF NOT EXISTS action_receipts(user_id TEXT NOT NULL, operation_id TEXT NOT NULL, fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(user_id,operation_id));
     CREATE TABLE IF NOT EXISTS user_migrations(name TEXT PRIMARY KEY);`);
   const read=db.prepare('SELECT document FROM user_workspaces WHERE user_id=?');
   const write=db.prepare('INSERT INTO user_workspaces VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET document=excluded.document');
@@ -236,6 +290,8 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
   const member=db.prepare('SELECT user_id FROM list_members WHERE list_id=? AND user_id=?');
   const readPref=db.prepare('SELECT document FROM list_preferences WHERE user_id=? AND list_id=?');
   const writePref=db.prepare('INSERT INTO list_preferences VALUES(?,?,?) ON CONFLICT(user_id,list_id) DO UPDATE SET document=excluded.document');
+  const readReceipt = db.prepare('SELECT fingerprint,receipt FROM action_receipts WHERE user_id=? AND operation_id=?');
+  const writeReceipt = db.prepare('INSERT INTO action_receipts VALUES(?,?,?,?)');
   const personalKeys=['favorite','archived','categoryId','position'];
   const personal=list=>Object.fromEntries(personalKeys.map(key=>[key,list[key]]));
   const canonical=list=> {
@@ -290,7 +346,7 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
     if(!row || (row.owner_id!==userId && !member.get(listId,userId))) throw new InputError('List not found or access has ended.',404);
     return row.owner_id;
   }
-  const covers = createCoverStore(db, { access, raw, transaction });
+  const covers = createCoverStore(db, { access, raw, transaction, replayReceipt, recordReceipt });
   function projection(userId) {
     ensure(userId);
     const own=raw(userId),lists=own.lists.map(l=>({...l,role:'owner',ownerUsername:username(userId)}));
@@ -327,12 +383,31 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
       saveOwned(editedOwner,source);
     }
   }
-  function action(input,userId) {
+  function replayReceipt(userId, command) {
+    if (!command) return;
+    const row = readReceipt.get(userId, command.id);
+    if (!row) return;
+    if (row.fingerprint !== command.fingerprint) {
+      throw new InputError('This operation ID was already used for a different action.', 409, 'OPERATION_ID_REUSED');
+    }
+    return JSON.parse(row.receipt);
+  }
+  function recordReceipt(userId, command, receipt = {}) {
+    if (command) writeReceipt.run(userId, command.id, command.fingerprint, JSON.stringify(receipt));
+  }
+  function replay(input, userId) {
+    const receipt = replayReceipt(userId, operation(input));
+    if (receipt) return { ...get(userId), ...receipt };
+  }
+  function action(input,userId,{prepared = input, resolvedImages} = {}) {
     object(input);object(input.payload);
     const type=string(input.type,'Action type',80,true),p=input.payload;
+    const command = operation(input);
     const receipt=transaction(()=> {
+      const previous = replayReceipt(userId, command);
+      if (previous) return previous;
       let editedOwner=null;
-      if(!['samples.remove','category.create','category.update','category.delete','list.create'].includes(type)) {
+      if(!['samples.remove','category.create','category.update','category.delete','list.create','workspace.import'].includes(type)) {
         editedOwner=access(userId,id(p.listId));
         if(editedOwner!==userId) {
           if(type==='list.delete') throw new InputError('Only the owner can delete this list. Leave it to remove it from your library.',403);
@@ -348,7 +423,9 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
       if(type==='list.update' && Object.hasOwn(p,'position')) pos(p.position);
       let result;
       if(type==='samples.remove') workspace.lists=workspace.lists.filter(l=>l.role==='editor' || !l.isSample);
-      else result=applyAction(workspace,input);
+      else if (type === 'workspace.import') appendCopies(workspace, validateWorkspace(prepared.payload.workspace), p.contentIds);
+      else result=applyAction(workspace,prepared);
+      if (resolvedImages) result = { ...result, resolvedImages };
       if(type==='category.delete' || (type==='list.update' && Object.keys(p).every(key=>key==='listId' || key==='expectedOrderToken' || personalKeys.includes(key)))) {
         for(const list of workspace.lists) if(originalTimes.has(list.id)) list.updatedAt=originalTimes.get(list.id);
       }
@@ -364,6 +441,7 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
         covers.onCreate(result.createdListId, type === 'list.clone' ? p.listId : null, generateCovers && active);
       }
       if (type === 'list.update' && editedOwner === userId && p.archived === true) covers.cancel(p.listId);
+      recordReceipt(userId, command, result);
       return result;
     });
     return {...get(userId),...receipt};
@@ -372,18 +450,24 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
     const workspace=projection(userId);
     return validateWorkspace({...workspace,lists:workspace.lists.filter(l=>l.role==='owner')},{boundInput:false});
   }
+  function appendCopies(workspace, document, supplied) {
+    if (supplied !== undefined) object(supplied);
+    const mapping = new Map();
+    const mapEntry = entry => mapping.set(entry.id, supplied ? createdId(supplied, entry.id) : randomUUID());
+    for (const category of document.categories) mapEntry(category);
+    for (const list of document.lists) {
+      mapEntry(list);
+      mapContentIds(list, mapping, supplied);
+    }
+    const categoryStart=appendPosition(workspace.categories),listStart=appendPosition(workspace.lists);
+    workspace.categories.push(...document.categories.toSorted((a,b)=>a.position-b.position).map((c,index)=>({...c,id:mapping.get(c.id),position:categoryStart+index})));
+    workspace.lists.push(...document.lists.toSorted((a,b)=>a.position-b.position).map((l,index)=>({...remapListContent(l,mapping),id:mapping.get(l.id),categoryId:l.categoryId===null ? null : mapping.get(l.categoryId),position:listStart+index,isSample:false})));
+  }
   function importCopies(input,userId) {
     const document=validateWorkspace(input);
     transaction(()=> {
-      const workspace=projection(userId),mapping=new Map();
-      for(const category of document.categories) mapping.set(category.id,randomUUID());
-      for(const list of document.lists) {
-        mapping.set(list.id,randomUUID());
-        mapContentIds(list,mapping);
-      }
-      const categoryStart=appendPosition(workspace.categories),listStart=appendPosition(workspace.lists);
-      workspace.categories.push(...document.categories.toSorted((a,b)=>a.position-b.position).map((c,index)=>({...c,id:mapping.get(c.id),position:categoryStart+index})));
-      workspace.lists.push(...document.lists.toSorted((a,b)=>a.position-b.position).map((l,index)=>({...remapListContent(l,mapping),id:mapping.get(l.id),categoryId:l.categoryId===null ? null : mapping.get(l.categoryId),position:listStart+index,isSample:false})));
+      const workspace = projection(userId);
+      appendCopies(workspace, document);
       persistProjection(userId,workspace);
     });
     return get(userId);
@@ -404,7 +488,7 @@ export function createUserStore(dataDir, { legacyOwnerId = null, username = () =
     return row;
   }
   return {
-    ensure,get,action,covers,import:importCopies,export:exportOwned,
+    ensure,get,action,replay,checkAccess:access,covers,import:importCopies,export:exportOwned,
     health:()=>db.prepare('SELECT 1').get(),
     sharing,
     invite(userId,listId) {
