@@ -113,6 +113,7 @@ Successful creation commands return the full workspace plus the exact ID created
 | list.delete | listId |
 | list.clone | listId, title? |
 | list.reset | listId; resets completion only; active checklist working lists only |
+| list.deleteDone | listId, itemIds (1–5000 IDs confirmed by the user). Deletes only those still checked in this active checklist. Missing or reopened items are skipped. Requires the `delete-done` capability. |
 | section.create | listId, title, expectedOrderToken on numbered lists |
 | section.update | listId, sectionId, title |
 | section.delete | listId, sectionId, expectedOrderToken on numbered lists. Items append to the unsectioned group. |

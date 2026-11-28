@@ -130,6 +130,13 @@ internal fun OfflineAction.rebase(workspace: Workspace): ActionPlan {
         "subitem.create" -> if (subitem != null) return ActionPlan.Done()
         "list.delete" -> if (!list.owner) return unavailable()
         "list.reset" -> if (list.kind != "checklist" || list.isTemplate || list.archived) return unavailable()
+        "list.deleteDone" -> {
+            if (list.kind != "checklist" || list.isTemplate || list.archived) return unavailable()
+            val confirmed = data.strings("itemIds").toSet()
+            val eligible = list.items.filter { it.checked && it.id in confirmed }.map { it.id }
+            if (eligible.isEmpty()) return ActionPlan.Done()
+            fields["itemIds"] = strings(eligible)
+        }
         "list.update" -> if (!list.owner) fields.keys.removeAll(setOf("numbered", "kind", "repeatCadence", "isTemplate"))
         "place.create", "recipient.create" -> {
             val proposed = if (type == "place.create") data.asPlace() else null
@@ -542,6 +549,11 @@ private fun GatherList.applyOfflineList(type: String, data: JsonObject): GatherL
     return when (type) {
         "cover.put" -> copy(coverId = data.string("digest"))
         "list.update" -> editProperties(data)
+        "list.deleteDone" -> {
+            val confirmed = data.strings("itemIds").toSet()
+            val remaining = items.filterNot { it.checked && it.id in confirmed }
+            if (remaining.size == items.size) this else copy(items = remaining).normalizedItems()
+        }
         "list.reset" -> copy(items = items.map { it.copy(checked = false, subitems = it.subitems.map { child -> child.copy(checked = false) }) })
         "section.create" -> copy(sections = sections + Section(checkNotNull(sectionId), data.string("title").orEmpty(),
             (sections.maxOfOrNull { it.position } ?: -1) + 1))

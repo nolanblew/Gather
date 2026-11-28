@@ -112,7 +112,7 @@ The Node server serves the built app and API together at http://localhost:3000. 
 - Use favorites, categories, and search to find a list. Search includes items, notes, quantities, sections, and categories; typo and meaning matches show stored evidence.
 - Item details hold quantity and notes. Sections and accessible ordering controls keep bigger lists organized.
 - Templates are separate master lists. Starting one makes a dated copy with all items unchecked; the master stays intact.
-- Templates carry their list kind and Manual/Daily/Weekly repeat label. An active checklist with checked items has a confirmed Start again action. Repeat labels never schedule automatic resets.
+- Templates carry their list kind and Manual/Daily/Weekly repeat label. On an active checklist, **Start again** clears checkmarks. **List actions → Delete done** permanently removes checked items and their steps after confirmation, including items hidden by filters. Repeat labels never schedule automatic resets.
 - Archive keeps lists recoverable. Permanent deletion and workspace restore require confirmation.
 - Settings provides JSON export and **Import backup copy**. Import adds private copies after validation and leaves existing lists and sharing unchanged.
 
