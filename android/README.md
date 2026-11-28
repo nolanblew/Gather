@@ -31,7 +31,7 @@ Release application ID: `ninja.takeya.gather`. Keep the signing keystore and its
 
 The signed, optimized APK is `app/build/outputs/apk/release/app-release.apk`. Release packaging fails if signing is unavailable. Retain the same keystore for upgrades. The website's `/.well-known/assetlinks.json` must contain this package and release certificate fingerprint to verify Android App Links. Debug signatures are deliberately not trusted by production App Links.
 
-See [manual GitHub releases](../docs/ORGANIZATION-ANDROID-RELEASE-20261116.md#manual-github-releases) for the signed APK workflow, required secrets, and release tags.
+To publish from GitHub, open **Actions → Release Android APK → Run workflow**, select the reviewed ref and enter `android-vX.Y.Z` matching its Gradle `versionName`. For an app update, increase both `versionName` and `versionCode` first. The workflow verifies the production certificate and package, uploads the signed APK and SHA-256 checksum as a 30-day Actions artifact, and attaches both files to the GitHub Release. Configure the four existing production [signing secrets](../docs/ORGANIZATION-ANDROID-RELEASE-20261116.md#manual-github-releases) before the first run. If an upload is interrupted, use **Re-run failed jobs** to finish the release with the APK from its successful build.
 
 ## What is native
 

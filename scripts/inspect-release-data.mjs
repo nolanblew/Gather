@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const root = process.argv[2] || '/app/data';
-const migration = { 'organization-v3': 'workspace-v3', 'organization-v4': 'workspace-v4' }[process.argv[3]];
+const mode = process.argv[3] || 'accounts';
+const migration = { 'organization-v3': 'workspace-v3', 'organization-v4': 'workspace-v4' }[mode];
 const organization = Boolean(migration);
 // A cleanly stopped WAL database can require a new shared-memory sidecar even
 // when opened read-only. Inspect a temporary copy so the source mount stays
@@ -35,7 +36,7 @@ for (const filename of ['account.sqlite', 'workspace.sqlite', 'gather.sqlite']) 
     const columns = db.prepare(`PRAGMA table_info(${quoted})`).all().map(row => row.name);
     // The additive transport column is excluded to compare old cookie sessions
     // with the same records after native auth migration.
-    const comparableColumns = columns.filter(column => organization || column !== 'transport');
+    const comparableColumns = columns.filter(column => mode !== 'accounts' || column !== 'transport');
     const selected = comparableColumns.map(column => '"' + column.replaceAll('"', '""') + '"').join(',');
     let rows = db.prepare(`SELECT ${selected} FROM ${quoted}`).all();
     if (organization && filename === 'gather.sqlite' && name === 'user_workspaces') {

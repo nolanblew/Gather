@@ -163,11 +163,30 @@ jobs:
           if [[ -z "$release" ]]; then
             gh release create "$RELEASE_TAG" "$apk" "$apk.sha256" --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" --title "Gather Android $VERSION" --generate-notes
-          elif [[ "$tag_exists" != true ]]; then
+          elif [[ "$tag_exists" != true ]] && ! jq -e --arg sha "$GITHUB_SHA" '.draft and .target_commitish == $sha' <<< "$release" > /dev/null; then
             echo "::error::The existing release has no fixed tag. Verify its target commit before attaching assets."
             exit 1
-          elif jq -e --arg name "$apk" 'any(.assets[]; .name == $name)' <<< "$release" > /dev/null; then
-            echo "The release already contains $apk."
           else
-            gh release upload "$RELEASE_TAG" "$apk" "$apk.sha256" --repo "$GITHUB_REPOSITORY"
+            # A previous upload may have stopped between the two assets.
+            # Complete the release only with bytes verified by the build job.
+            has_asset() {
+              jq -e --arg name "$1" 'any(.assets[]; .name == $name and .state == "uploaded")' <<< "$release" > /dev/null
+            }
+            saved=$(mktemp -d "$RUNNER_TEMP/gather-assets.XXXXXXXX")
+            if has_asset "$apk"; then
+              gh release download "$RELEASE_TAG" --pattern "$apk" --dir "$saved" --repo "$GITHUB_REPOSITORY"
+              cmp "$apk" "$saved/$apk" || { echo "::error::The release already contains a different APK. Rerun the publish job with the original verified artifact."; exit 1; }
+            fi
+            if has_asset "$apk.sha256"; then
+              gh release download "$RELEASE_TAG" --pattern "$apk.sha256" --dir "$saved" --repo "$GITHUB_REPOSITORY"
+              cmp "$apk.sha256" "$saved/$apk.sha256" || { echo "::error::Release checksum conflicts with APK."; exit 1; }
+            fi
+            for file in "$apk" "$apk.sha256"; do
+              if ! has_asset "$file"; then
+                gh release upload "$RELEASE_TAG" "$file" --repo "$GITHUB_REPOSITORY"
+              fi
+            done
+            if jq -e '.draft' <<< "$release" > /dev/null; then
+              gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+            fi
           fi

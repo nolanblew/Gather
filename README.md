@@ -186,7 +186,18 @@ The application uses system fonts and local vector icons; its rendered UI has no
 
 Gather is deployed at **http://192.168.68.68:48732/** on `nolan@192.168.68.68`. The port was checked against every running/stopped container's configured bindings and an actual host socket bind before first deployment. The listener binds the server's LAN IP. Other services were left running unchanged.
 
-The current production release is **`gather:20261106-android`** in `/home/nolan/dockers/gather/releases/20261106-android-verified`; `/home/nolan/dockers/gather/current` points to it. The active volume is `gather_lan_accounts_20261106_android_verified`. The previous `gather_lan_accounts_20261106_copy` volume remains untouched for rollback, and a full pre-upgrade archive is retained in the release directory. The upgrade preserved existing accounts, password hashes, sessions, lists and sharing relationships. See [Android/shared API release verification](docs/ANDROID-RELEASE-20261106.md) and [accounts recovery](docs/ACCOUNTS-SHARING-RELEASE-20261105.md).
+The active release is the target of `/home/nolan/dockers/gather/current`. For a deployment from the server, keep a Git checkout alongside the release tree. The server-side GPT can use the repository’s [deploy-gather-web skill](.agents/skills/deploy-gather-web/SKILL.md), or run these commands from that checkout.
+
+```sh
+./scripts/deploy-web --plan           # Fetch origin/main and show its commit and running target
+./scripts/deploy-web --ref origin/main  # Deploy the fetched revision, or supply its full commit SHA
+```
+
+Running `./scripts/deploy-web` without arguments fetches and deploys the latest merged `main`. The command needs Git, Bash, Python 3.11+, flock, and Docker with Compose v2 on the host. Set `GATHER_DEPLOY_ROOT` for an installation in a different directory with the same layout.
+
+The image builds while Gather is running. The script then stops Gather, archives its active volume, starts the new image against a clone, and checks database integrity and account and workspace contents. After the service passes its HTTP checks, `current` switches to the new release. A healthy repeat of the same commit is a no-op. Each release keeps its private settings, source commit, deployment report, and pre-upgrade archive. If a post-switch check fails after the candidate has taken writes, the script keeps the candidate volume serving and reports the staged release. Inspect that volume before choosing a rollback.
+
+For the original multi-account rollout and recovery procedures, see [Android/shared API release verification](docs/ANDROID-RELEASE-20261106.md) and [accounts recovery](docs/ACCOUNTS-SHARING-RELEASE-20261105.md).
 
 Local and LAN installations are independent. The production site is https://gather.takeya.ninja/ with HTTPS and an HTTP-to-HTTPS redirect. Use HTTPS for accounts; the LAN HTTP address remains available for health checks.
 PowerShell operations:
